@@ -46,8 +46,9 @@ class RenderEnv:
             e["LD_LIBRARY_PATH"] = f"{self.libdir}:{old}" if old else self.libdir
         if self.display:
             e["DISPLAY"] = self.display
-            e["SDL_VIDEODRIVER"] = ""      # Ren'Py 7.x 用不了 wayland
-            e.pop("SDL_VIDEODRIVER")
+            # Ren'Py 7.x 用不了 wayland，显式强制走 x11。
+            # 旧代码先赋空串又 pop，等于什么都没做，SDL 仍可能走 wayland 白屏。
+            e["SDL_VIDEODRIVER"] = "x11"
         if self.xauthority:
             e["XAUTHORITY"] = self.xauthority
         return e
@@ -76,8 +77,11 @@ def _game_libdir(root: Path) -> Path:
     if exact.is_dir():
         return exact
     cands = sorted((root / "lib").glob("linux-*")) if (root / "lib").is_dir() else []
+    # 兜底也必须校验架构：x86_64 机器上只有 lib/linux-i686 时选它会复制错架构
+    # 的 libGLU 并设为 LD_LIBRARY_PATH 前缀，补丁静默失效（注释自述的
+    # 「必须按本机架构选」不能破）。只认目录名含本机架构的。
     for c in cands:
-        if any(c.glob("*.so*")):
+        if _arch() in c.name and any(c.glob("*.so*")):
             return c
     return exact
 

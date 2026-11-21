@@ -80,8 +80,14 @@ def _decrypt_v12(f, offset: int, size: int, key: int) -> bytes:
     return bytes(data)
 
 
-def list_entries(arc: Path) -> list[tuple[str, int, int, int]]:
-    """读归档条目表 → [(名字, offset, size, key)]。"""
+def _read_entries(arc: Path) -> list[tuple[bytes, str, int, int, int]]:
+    """读归档条目表 → [(原始名字字节, 规范化名字, offset, size, key)]。
+
+    **原始名字字节必须留着**：RGSS3 运行时按字符串查文件，归档里存的是
+    反斜杠路径（`Data\\Scripts.rvdata2`）。repack 时必须原样写回反斜杠，
+    换成正斜杠会让游戏报 `failed to load script`（找不到 Scripts.rvdata2，
+    整包脚本加载失败，游戏直接退出）。
+    """
     with open(arc, "rb") as f:
         head = f.read(12)
         ver, magic = _rgss_magic_key(head)
@@ -98,21 +104,22 @@ def list_entries(arc: Path) -> list[tuple[str, int, int, int]]:
                 nlen ^= magic
                 if off == 0 or nlen > 1024:
                     break
-                name = bytearray(f.read(nlen))
-                for k in range(nlen):
-                    name[k] ^= (magic >> (8 * (k % 4))) & 0xFF
-                    if name[k] == 0x5C:
-                        name[k] = 0x2F
             else:
                 if off == 0:
                     break
-                name = bytearray(f.read(nlen))
-                for k in range(nlen):
-                    name[k] ^= (magic >> (8 * (k % 4))) & 0xFF
-                    if name[k] == 0x5C:
-                        name[k] = 0x2F
-            out.append((name.decode("utf-8", "replace"), off, size, key))
+            raw = bytearray(f.read(nlen))
+            for k in range(nlen):
+                raw[k] ^= (magic >> (8 * (k % 4))) & 0xFF
+            # 规范化副本只给本地文件系统用；写回归档一律用 raw
+            norm = bytes(raw).replace(b"\\", b"/").decode("utf-8", "replace")
+            out.append((bytes(raw), norm, off, size, key))
         return out
+
+
+def list_entries(arc: Path) -> list[tuple[str, int, int, int]]:
+    """读归档条目表 → [(规范化名字, offset, size, key)]。解包用这个。"""
+    return [(norm, off, size, key)
+            for _raw, norm, off, size, key in _read_entries(arc)]
 
 
 def unpack(arc: Path, dest: Path) -> int:
@@ -151,8 +158,10 @@ def repack(arc: Path, root: Path, out: Path | None = None,
     只是解包产物 —— 不改归档，游戏里看到的还是英文原文。
 
     设计要点：
-    - 条目顺序、每个条目的初始 key、文件名沿用原归档，一个都不动。
-      未改动的资源**直接搬加密块**（不解密再加密，省时且零风险）。
+    - 条目顺序、每个条目的初始 key、**文件名原始字节**沿用原归档，一个都不动。
+      名字必须带反斜杠写回（见 `_read_entries` 的注释），换成正斜杠游戏会
+      报 `failed to load script`。
+    - 未改动的资源**直接搬加密块**（不解密再加密，省时且零风险）。
     - 只有 `replace_prefix` 开头且明文大小与原条目不同的文件，才读明文
       重新加密 —— 这些正是被翻译过的 rvdata2。
     - 条目表末尾那个 16 字节终止哨兵（off 字段存 magic）必须照写，
@@ -162,7 +171,7 @@ def repack(arc: Path, root: Path, out: Path | None = None,
     root = Path(root)
     out = Path(out) if out else src.with_suffix(src.suffix + ".new")
 
-    ents = list_entries(src)
+    ents = _read_entries(src)
     if not ents:
         return False, "归档条目表为空"
 
@@ -178,23 +187,23 @@ def repack(arc: Path, root: Path, out: Path | None = None,
         # 译文长度碰巧和原文一样时（很常见：短词换短词）会漏判，游戏仍然
         # 显示英文。所以 Data/ 开头的条目一律重新加密，反正只有 992 个文件、
         # 20MB 左右，代价可以忽略；其余资源直接搬加密块。
-        plan = []          # [(name, size, key, source)]
-        for name, off, size, key in ents:
-            src_file = root / name
-            if name.startswith(replace_prefix) and src_file.is_file():
-                plan.append((name, src_file.stat().st_size, key, ("file", src_file)))
+        plan = []          # [(原始名字字节, size, key, source)]
+        for raw, norm, off, size, key in ents:
+            src_file = root / norm
+            if norm.startswith(replace_prefix) and src_file.is_file():
+                plan.append((raw, src_file.stat().st_size, key, ("file", src_file)))
             else:
-                plan.append((name, size, key, ("arc", off, size)))
+                plan.append((raw, size, key, ("arc", off, size)))
 
-        # 2. 算新条目表长度
-        tbl_len = 12 + sum(16 + len(n.encode("utf-8")) for n, _s, _k, _ in plan)
+        # 2. 算新条目表长度（用原始名字字节的长度，不是规范化后的）
+        tbl_len = 12 + sum(16 + len(raw) for raw, _s, _k, _ in plan)
         data_start = tbl_len + 16            # 末尾 16 字节终止哨兵
 
         # 3. 重算 offset
         layout = []
         cur = data_start
-        for name, size, key, source in plan:
-            layout.append((name, cur, size, key, source))
+        for raw, size, key, source in plan:
+            layout.append((raw, cur, size, key, source))
             cur += size
 
         # 4. 写新归档
@@ -203,14 +212,14 @@ def repack(arc: Path, root: Path, out: Path | None = None,
         with open(tmp, "wb") as w:
             w.write(b"RGSSAD\x00\x03")
             inv9 = pow(9, -1, 1 << 32)
-            raw = ((magic - 3) * inv9) & 0xFFFFFFFF
-            w.write(struct.pack("<I", raw))
+            raw_magic = ((magic - 3) * inv9) & 0xFFFFFFFF
+            w.write(struct.pack("<I", raw_magic))
 
-            for name, off, size, key, source in layout:
-                nb = name.encode("utf-8")
+            for raw, off, size, key, source in layout:
                 w.write(struct.pack("<IIII",
-                                    off ^ magic, size ^ magic, key ^ magic, len(nb) ^ magic))
-                enc = bytearray(nb)
+                                    off ^ magic, size ^ magic, key ^ magic,
+                                    len(raw) ^ magic))
+                enc = bytearray(raw)
                 for k in range(len(enc)):
                     enc[k] ^= (magic >> (8 * (k % 4))) & 0xFF
                 w.write(enc)
@@ -218,7 +227,7 @@ def repack(arc: Path, root: Path, out: Path | None = None,
             # 终止哨兵
             w.write(struct.pack("<IIII", magic, 0, 0, 0))
 
-            for name, off, size, key, source in layout:
+            for raw, off, size, key, source in layout:
                 if source[0] == "arc":
                     f.seek(source[1])
                     w.write(f.read(source[2]))
@@ -332,6 +341,29 @@ def _walk_commands(node):
     return []
 
 
+def _map_event_commands(mobj):
+    """遍历单个 RPG::Map 对象里所有事件指令，返回 [(event_id, page_idx, cmd_idx, cmd)]。
+
+    MapXXX.rvdata2 顶层是 RPG::Map（单个对象，不是数组），事件在
+    @events（RubyHash：event_id => RPG::Event）→ 每事件的 @pages
+    （Array of RPG::Event::Page）→ 每页的 @list（Array of RPG::EventCommand）。
+    逐页逐条摊平，collect 与 apply_all 用同一套 (eid, pi, ci) 索引定位。
+    """
+    out = []
+    events = getattr(mobj, "ivars", {}).get("@events")
+    pairs = getattr(events, "pairs", None)
+    if pairs is None and isinstance(events, dict):
+        pairs = list(events.items())
+    for eid, ev in (pairs or []):
+        pages = getattr(ev, "ivars", {}).get("@pages")
+        if not isinstance(pages, list):
+            continue
+        for pi, page in enumerate(pages):
+            for ci, cmd in enumerate(_walk_commands(page)):
+                out.append((eid, pi, ci, cmd))
+    return out
+
+
 def collect(items_map: dict) -> list[tuple]:
     """把 load 出来的对象里所有待翻文本摊平。
 
@@ -340,6 +372,30 @@ def collect(items_map: dict) -> list[tuple]:
     out: list[tuple] = []
 
     for fname, root_obj in items_map.items():
+        # MapXXX.rvdata2 顶层是单个 RPG::Map 对象（RubyObject），不是数组。
+        # 必须先于 isinstance(list) 判断，否则地图对话整片漏收（旧代码把它当
+        # list 取 data[0].@list，而事件实际在 @events→@pages→@list）。
+        if fname.startswith("Map") and fname != "MapInfos":
+            mobj = root_obj
+            if not hasattr(mobj, "ivars"):
+                continue
+            for eid, pi, ci, cmd in _map_event_commands(mobj):
+                iv = getattr(cmd, "ivars", {})
+                code = iv.get("@code")
+                params = iv.get("@parameters")
+                if not isinstance(params, list) or not params:
+                    continue
+                if code in (401, 405):
+                    t = _to_str(params[0])
+                    if t.strip():
+                        out.append((("mcmd", fname, eid, pi, ci), t))
+                elif code == 102 and len(params) >= 1:
+                    for oi, opt in enumerate(params[0] if isinstance(params[0], list) else []):
+                        t = _to_str(opt)
+                        if t.strip():
+                            out.append((("mopt", fname, eid, pi, ci, oi), t))
+            continue
+
         data = root_obj
         if not isinstance(data, list):
             continue
@@ -368,26 +424,6 @@ def collect(items_map: dict) -> list[tuple]:
         if fname == "MapInfos":
             continue
 
-        if fname.startswith("Map"):
-            for ci, cmd in enumerate(
-                _walk_commands(data[0]) if data and hasattr(data[0], "ivars") else []
-            ):
-                iv = getattr(cmd, "ivars", {})
-                code = iv.get("@code")
-                params = iv.get("@parameters")
-                if not isinstance(params, list) or not params:
-                    continue
-                if code in (401, 405):
-                    t = _to_str(params[0])
-                    if t.strip():
-                        out.append((("cmd", fname, 0, ci), t))
-                elif code == 102 and len(params) >= 1:
-                    for oi, opt in enumerate(params[0] if isinstance(params[0], list) else []):
-                        t = _to_str(opt)
-                        if t.strip():
-                            out.append((("opt", fname, 0, ci, oi), t))
-            continue
-
         # 数据库表
         fields = DB_FIELDS.get(fname)
         if not fields:
@@ -408,16 +444,41 @@ def collect(items_map: dict) -> list[tuple]:
 def apply_all(items_map: dict, done: dict[tuple, str]) -> int:
     """把 done{定位: 译文} 写回 items_map。"""
     n = 0
+    # 地图文件顶层是 RPG::Map 对象，按 (eid, pi, ci) 索引命令。每次调用
+    # 现算一次，因为同一文件会被多条 mcmd/mopt 命中，按索引直取最快。
+    _map_cmd_cache: dict[str, list[tuple]] = {}
+
+    def map_cmd_at(fname, eid, pi, ci):
+        if fname not in _map_cmd_cache:
+            mobj = items_map.get(fname)
+            _map_cmd_cache[fname] = _map_event_commands(mobj) if hasattr(mobj, "ivars") else []
+        for (_eid, _pi, _ci, cmd) in _map_cmd_cache[fname]:
+            if (_eid, _pi, _ci) == (eid, pi, ci):
+                return cmd
+        return None
+
     for key, text in done.items():
         kind = key[0]
-        if kind == "cmd":
+        if kind in ("mcmd", "mopt"):
+            _, fname, eid, pi, ci = key[:5]
+            cmd = map_cmd_at(fname, eid, pi, ci)
+            if cmd is None:
+                continue
+            params = cmd.ivars.get("@parameters")
+            if not isinstance(params, list) or not params:
+                continue
+            if kind == "mcmd":
+                params[0] = _mk_str(params[0], text)
+                n += 1
+            elif isinstance(params[0], list) and key[5] < len(params[0]):
+                params[0][key[5]] = _mk_str(params[0][key[5]], text)
+                n += 1
+        elif kind == "cmd":
             _, fname, idx, ci = key
             data = items_map.get(fname)
             if not isinstance(data, list) or idx >= len(data) or data[idx] is None:
                 continue
-            cmds = _walk_commands(data[idx]) if fname == "CommonEvents" else (
-                _walk_commands(data[0]) if data and hasattr(data[0], "ivars") else []
-            )
+            cmds = _walk_commands(data[idx])
             if ci < len(cmds):
                 params = cmds[ci].ivars.get("@parameters")
                 if isinstance(params, list) and params:
@@ -428,9 +489,7 @@ def apply_all(items_map: dict, done: dict[tuple, str]) -> int:
             data = items_map.get(fname)
             if not isinstance(data, list) or idx >= len(data) or data[idx] is None:
                 continue
-            cmds = _walk_commands(data[idx]) if fname == "CommonEvents" else (
-                _walk_commands(data[0]) if data and hasattr(data[0], "ivars") else []
-            )
+            cmds = _walk_commands(data[idx])
             if ci < len(cmds):
                 params = cmds[ci].ivars.get("@parameters")
                 if isinstance(params, list) and params and isinstance(params[0], list):

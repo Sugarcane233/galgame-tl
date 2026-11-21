@@ -87,16 +87,23 @@ def _parse(raw: str, n: int) -> list[str]:
         return d
 
     # translate_a/single: [ [["译1","原1",...], ["译2",...]], ... ]
+    # 外层每个 group 对应一个 q 参数，group 内是这句被拆成的若干 segment。
+    # 必须**按 group 各自 join**成一句：把全部 segment 摊平再 join 会把
+    # N 句译文粘连成一句，句子边界丢失（clients5 429 回退 gtx 时就会这样）。
     if isinstance(d, list) and d and isinstance(d[0], list):
-        segs = []
+        out = []
         for group in d:
-            if isinstance(group, list):
-                for seg in group:
-                    if isinstance(seg, list) and seg and isinstance(seg[0], str):
-                        segs.append(seg[0])
-                    elif isinstance(seg, str):
-                        segs.append(seg)
-        return ["".join(segs)] if segs else []
+            if not isinstance(group, list):
+                continue
+            parts = []
+            for seg in group:
+                if isinstance(seg, list) and seg and isinstance(seg[0], str):
+                    parts.append(seg[0])
+                elif isinstance(seg, str):
+                    parts.append(seg)
+            if parts:
+                out.append("".join(parts))
+        return out
 
     # 单句对象形式 {"sentences": [{"trans": "..."}]}
     if isinstance(d, dict):

@@ -514,8 +514,15 @@ class RenPyAdapter(EngineAdapter):
                 log(f"  跳过（已解过）: {rpa.name}")
                 continue
             log(f"  解包 {rpa.name} …")
-            subprocess.run([sys.executable, "-m", "unrpa", "-m", "-p", str(game), str(rpa)],
-                           check=False, capture_output=True)
+            cp = subprocess.run([sys.executable, "-m", "unrpa", "-m", "-p", str(game), str(rpa)],
+                                check=False, capture_output=True)
+            # 解包失败绝不能改 .bak：旧代码不查 returncode 就 rename，unrpa
+            # 报错（rpa 损坏 / 依赖缺失）也照样改名，下次运行被「已解过」永久
+            # 跳过，解包内容静默丢失且无任何报错。
+            if cp.returncode != 0:
+                err = (cp.stderr or cp.stdout or b"").decode("utf-8", "replace").strip()
+                log(f"  ! 解包失败 {rpa.name}（returncode={cp.returncode}）: {err[:200]}")
+                continue
             rpa.rename(game / (rpa.name + ".bak"))
         # 2) 反编译 —— **只反编译没有明文 .rpy 的 rpyc**
         #

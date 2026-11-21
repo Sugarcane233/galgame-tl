@@ -451,7 +451,11 @@ def _extract_json_array(text: str) -> list[str]:
             data = json.loads(t, strict=False)
             if not isinstance(data, list):
                 raise ValueError("不是数组")
-            return [str(x) for x in data]
+            # null 必须占位成空串而不是 str(None)="None"：模型在流中途被掐断时
+            # 会返回 [..., null]，直接 str() 会把字面量 "None" 写进译文落缓存，
+            # 游戏里就显示 "None"。空串会让下游按"未翻成"重试，不产生脏数据，
+            # 也不破坏与原文的对齐（长度不变）。
+            return [("" if x is None else str(x)) for x in data]
         except Exception:
             if attempt == 1:
                 # 第三步：救前缀。截断的数组走这里，能拿多少算多少。
@@ -840,8 +844,8 @@ class Translator:
 
     def _cool_down(self):
         """每次成功请求后慢慢把退避档位降回来。"""
-        if self._rate_streak:
-            with self._lock:
+        with self._lock:
+            if self._rate_streak:
                 self._rate_streak = max(0, self._rate_streak - 1)
 
     def _translate_one(self, src: str, ctx: dict) -> str:

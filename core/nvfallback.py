@@ -174,13 +174,16 @@ def _parse_array(text: str) -> list[str] | None:
     if t.startswith("```"):
         t = t.split("\n", 1)[-1]
         t = t.rsplit("```", 1)[0]
-    i, j = t.find("["), t.rfind("]")
-    if i < 0 or j <= i:
+    i = t.find("[")
+    if i < 0:
         return None
+    # 用 raw_decode 从第一个 `[` 开始解析，让 JSON 解码器自己配对括号：
+    # 旧写法 rfind("]") 会撞上译文里内嵌的半角 `]`（台词如 "He's the [best] one"）
+    # 而错误截断，导致 json.loads 失败、整批兜底白跑。
     try:
-        arr = json.loads(t[i:j + 1], strict=False)
+        arr, _ = json.JSONDecoder().raw_decode(t[i:])
     except Exception:
         return None
     if not isinstance(arr, list):
         return None
-    return [str(x) for x in arr]
+    return [("" if x is None else str(x)) for x in arr]

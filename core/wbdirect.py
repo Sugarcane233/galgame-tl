@@ -224,11 +224,7 @@ def chat(acc: Account, model: str, messages: list[dict],
             except Exception:
                 pass
     out = "".join(parts).strip()
-    chat.last_usage = usage
     return out
-
-
-chat.last_usage = {}
 
 
 # 模型目录的两条路：`/v3/config` 是 app 渠道的文档（带促销标记，
