@@ -150,7 +150,8 @@ SYSTEM_BASE = (
     "\n"
     "硬性要求：\n"
     "1. 逐行对应，输出长度必须等于输入长度，不得合并、拆分、省略任何一行；\n"
-    "2. 保留 ⟦n⟧ 与 ⟨Gx⟩ 这类占位符原样，位置按中文语序合理放置；\n"
+    "2. 每行开头的 ⟦S0⟧⟦S1⟧… 是行号标记，必须原样带回各自译文的最前面，"
+    "不要删除、改写或重编号；其余 ⟦n⟧ 与 ⟨Gx⟩ 这类占位符也原样保留，位置按中文语序合理放置；\n"
     "3. 保留原文的换行（\\n）与标点节奏；\n"
     "4. 语气、人称、口癖必须与说话人一致，同一角色全篇用同一种口吻；\n"
     "5. 拟声词、喘息、感叹词照实译出，不要替换成省略号或「……」；\n"
@@ -388,6 +389,45 @@ def unmask_glossary(s: str, gstore: dict[str, str]) -> str:
     return s
 
 
+# ------------------------------------------------------------------ 序号协议
+# 错位的根因：主流程靠「JSON 数组顺序 + zip 对齐」把译文对应回原文。模型在
+# 长句/敏感句上会乱序、跳行、凭空吐占位符，顺序一旦不可靠，A 的台词就写进
+# B 嘴里，而且看起来还像成功，是最难发现的脏数据。
+#
+# 参考 AiNiee 的做法：给每条待翻文本打一个「运输层序号」⟦S0⟧⟦S1⟧…，让模型
+# 原样带回，回填时按序号归位，不依赖数组顺序。用 ⟦S n ⟧ 而不用纯数字 ⟦n⟧，
+# 是因为 protect() 已经用 ⟦0⟧⟦1⟧ 当引擎控制码占位符，两者不能撞。
+_SEQ_RX = re.compile(rf"⟦S(\d+)[{_PH_CLOSE}]")
+
+
+def _seq_wrap(texts: list[str]) -> list[str]:
+    """给每条待翻文本打上运输层序号 ⟦S0⟧⟦S1⟧…。"""
+    return [f"⟦S{i}⟧{t}" for i, t in enumerate(texts)]
+
+
+def _decode_seq(outs: list[str], n: int) -> tuple[list[str], int]:
+    """从模型输出里按序号归位。
+
+    返回 `(dst_by_idx, n_tagged)`：
+      - dst_by_idx[i] = 第 i 条原文的译文（已去掉序号前缀），未命中为空串；
+      - n_tagged = 成功提取到序号的输出条数。
+
+    若 n_tagged == 0，说明模型这轮没遵守序号协议（可能整个把 ⟦Sn⟧ 删了），
+    调用方应降级回 zip 顺序对齐，否则会误判整批失败。
+    """
+    dst = [""] * n
+    n_tagged = 0
+    for got in outs:
+        m = _SEQ_RX.search(got)
+        if not m:
+            continue
+        idx = int(m.group(1))
+        if 0 <= idx < n and not dst[idx]:
+            dst[idx] = _SEQ_RX.sub("", got, count=1)
+            n_tagged += 1
+    return dst, n_tagged
+
+
 # ------------------------------------------------------------------- 结果
 @dataclass
 class BatchResult:
@@ -622,6 +662,9 @@ class Translator:
                 t, gt = mask_glossary(t, self.glossary)
                 enc.append(t)
                 per_line.append((st, gt))
+            # 打上运输层序号 ⟦S0⟧⟦S1⟧…，回填按序号归位而非 zip 顺序对齐。
+            # 模型已被训练成「原样保留 ⟦x⟧ 占位符」，序号几乎总是能带回。
+            enc_seq = _seq_wrap(enc)
 
             system = SYSTEM_BASE if attempt == 0 else SYSTEM_ESCALATE[
                 min(attempt - 1, len(SYSTEM_ESCALATE) - 1)]
@@ -630,7 +673,7 @@ class Translator:
                 before=before or "(无)",
                 after=after or "(无)",
                 n=len(enc),
-                payload=json.dumps(enc, ensure_ascii=False),
+                payload=json.dumps(enc_seq, ensure_ascii=False),
             )
             try:
                 raw = self.backend.chat(system, user)
@@ -674,21 +717,32 @@ class Translator:
                 #      20 句批里稳定只拿到 9 条，第 10 句吐两个字就被塞一句
                 #      `Sorry, I can't respond to this question.` 然后关流）。
                 #
-                # 铁律仍是"不能补空串"（会整体错位），但**前缀是可靠的**：
-                # 模型按序输出，前 k 条严格对应前 k 句原文。所以先把前缀落进
-                # done_map，剩下的按半批重发。以前这里直接整批作废，导致
-                # 一遇掐断就原地打转，那批永远翻不完。
+                # 现在优先按序号归位（即使总数少了几条，带序号的也能正确落位，
+                # 不会整体错位）；序号一条都没带回时才退回「前缀可靠」的 zip 对齐。
                 k = len(outs)
                 last_err = f"只返回 {k}/{len(enc)} 条（疑上游内容过滤中途掐断）"
                 if k:
                     with self._lock:
                         self.stats["refused"] += 1
-                    for src, got, (st, gt) in zip(remaining[:k], outs, per_line[:k]):
-                        if looks_like_refusal(got, src):
-                            continue
-                        text = unmask_glossary(restore(got, st), gt).strip()
-                        if text:
-                            done_map[src] = text
+                    dst_seq, n_tagged = _decode_seq(outs, len(remaining))
+                    if n_tagged:
+                        for i, got in enumerate(dst_seq):
+                            if not got:
+                                continue
+                            src = remaining[i]
+                            if looks_like_refusal(got, src):
+                                continue
+                            st, gt = per_line[i]
+                            text = unmask_glossary(restore(got, st), gt).strip()
+                            if text:
+                                done_map[src] = text
+                    else:
+                        for src, got, (st, gt) in zip(remaining[:k], outs, per_line[:k]):
+                            if looks_like_refusal(got, src):
+                                continue
+                            text = unmask_glossary(restore(got, st), gt).strip()
+                            if text:
+                                done_map[src] = text
                     remaining = [s_ for s_ in remaining if s_ not in done_map]
                 # 剩下的劈半再试（只一层，不递归）。劈开通常能绕开被掐的位置。
                 if len(remaining) > 1:
@@ -703,16 +757,35 @@ class Translator:
 
             next_remaining: list[str] = []
             got_any = False
-            for src, got, (st, gt) in zip(remaining, fixed, per_line):
-                if looks_like_refusal(got, src):
-                    next_remaining.append(src)
-                    continue
-                text = unmask_glossary(restore(got, st), gt).strip()
-                if not text:
-                    next_remaining.append(src)
-                    continue
-                done_map[src] = text
-                got_any = True
+            # 按序号归位（模型遵守协议时），否则退回 zip 顺序对齐。
+            dst_seq, n_tagged = _decode_seq(fixed, len(remaining))
+            if n_tagged:
+                for i, got in enumerate(dst_seq):
+                    if not got:
+                        next_remaining.append(remaining[i])
+                        continue
+                    src = remaining[i]
+                    if looks_like_refusal(got, src):
+                        next_remaining.append(src)
+                        continue
+                    st, gt = per_line[i]
+                    text = unmask_glossary(restore(got, st), gt).strip()
+                    if not text:
+                        next_remaining.append(src)
+                        continue
+                    done_map[src] = text
+                    got_any = True
+            else:
+                for src, got, (st, gt) in zip(remaining, fixed, per_line):
+                    if looks_like_refusal(got, src):
+                        next_remaining.append(src)
+                        continue
+                    text = unmask_glossary(restore(got, st), gt).strip()
+                    if not text:
+                        next_remaining.append(src)
+                        continue
+                    done_map[src] = text
+                    got_any = True
 
             if got_any and len(next_remaining) < len(remaining):
                 # 有进展：剩下的下一轮单独发
@@ -786,7 +859,8 @@ class Translator:
             enc.append(t)
             per_line.append((st, gt))
         try:
-            res = nv.chat(enc, ctx=ctx, model=self.nv_model or nv.DEFAULT_MODEL,
+            res = nv.chat(_seq_wrap(enc), ctx=ctx,
+                          model=self.nv_model or nv.DEFAULT_MODEL,
                           key=self.nv_key)
         except Exception as e:
             with self._lock:
@@ -803,7 +877,19 @@ class Translator:
             self.stats["nv_used"] += len(outs)
         if len(outs) < len(enc):
             self.log(f"  [NVIDIA] 只返回 {len(outs)}/{len(enc)} 条")
-        out: list[tuple[str, str]] = []
+        # 按序号归位，不靠数组顺序；模型不配合时退回 zip 对齐。
+        dst_seq, n_tagged = _decode_seq(outs, len(srcs))
+        if n_tagged:
+            out = []
+            for i, got in enumerate(dst_seq):
+                if not got:
+                    out.append((srcs[i], ""))
+                    continue
+                st, gt = per_line[i]
+                out.append((srcs[i],
+                            unmask_glossary(restore(got, st), gt).strip()))
+            return out
+        out = []
         for s, got, (st, gt) in zip(srcs, outs, per_line):
             text = unmask_glossary(restore(got, st), gt).strip()
             out.append((s, text))
@@ -911,6 +997,8 @@ class Translator:
             if not outs:
                 continue
             got = outs[0]
+            # 单句路径不发给模型序号，但模型可能惯性带 ⟦S0⟧，剥掉防残留。
+            got = _SEQ_RX.sub("", got, count=1)
             if looks_like_refusal(got, src):
                 continue
             text = unmask_glossary(restore(got, st), gt).strip()
@@ -938,7 +1026,7 @@ class Translator:
             before=ctx.get("before") or "(无)",
             after=ctx.get("after") or "(无)",
             n=len(enc),
-            payload=json.dumps(enc, ensure_ascii=False),
+            payload=json.dumps(_seq_wrap(enc), ensure_ascii=False),
         )
         try:
             outs = _extract_json_array(self.backend.chat(system, user))
@@ -956,6 +1044,18 @@ class Translator:
             return [(s_, "") for s_ in srcs]
         if not outs:
             return [(s_, "") for s_ in srcs]
+        # 按序号归位；模型不配合时退回 zip 顺序对齐。
+        dst_seq, n_tagged = _decode_seq(outs, len(srcs))
+        if n_tagged:
+            out = []
+            for i, got in enumerate(dst_seq):
+                if not got:
+                    out.append((srcs[i], ""))
+                    continue
+                st, gt = per_line[i]
+                out.append((srcs[i],
+                            unmask_glossary(restore(got, st), gt).strip()))
+            return out
         out = []
         for s_, got, (st, gt) in zip(srcs, outs, per_line):
             if looks_like_refusal(got, s_):

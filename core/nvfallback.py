@@ -60,8 +60,10 @@ SYSTEM = (
     "3. Placeholders like ⟨G0⟩ ⟦1⟧ are masked glossary terms or engine variables. "
     "Copy them through unchanged, in the position Chinese word order wants. "
     "NEVER translate, omit or renumber them.\n"
-    "4. Keep every \\n escape exactly where it is.\n"
-    "5. Output ONLY a JSON array of the same length as the input, nothing else."
+    "4. The ⟦S0⟧⟦S1⟧… prefix at the start of each input line is a line-number tag. "
+    "Keep it at the very front of that line's translation, unchanged.\n"
+    "5. Keep every \\n escape exactly where it is.\n"
+    "6. Output ONLY a JSON array of the same length as the input, nothing else."
 )
 
 # 兜底场景的补充说明：告诉模型它与主流程的合作关系，避免它把句子当孤立字符串。

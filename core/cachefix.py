@@ -34,7 +34,7 @@ import sys
 import tempfile
 
 from .llm import (PROTECT_RULES, protect, restore,
-                  mask_glossary, unmask_glossary, _PH_RX, _GL_RX)
+                  mask_glossary, unmask_glossary, _PH_RX, _GL_RX, _SEQ_RX)
 
 # 控制码分两类，严重程度差很远：
 #   颜色/图标/变量 —— 丢了会让控制码外泄、显示错色、变量不展开，必须重翻
@@ -72,6 +72,13 @@ def repair_one(src: str, dst: str, glossary: dict[str, str]
     n_slots = len(st) + len(gt)
 
     fixed = unmask_glossary(restore(dst, st), gt)
+
+    # 序号协议上线后，历史缓存里理论上不会带 ⟦S n⟧（那是发送时的运输前缀），
+    # 但模型偶尔会惯性把 ⟦S0⟧ 一起吐进译文，落进缓存后应剥掉，别写进游戏。
+    if _SEQ_RX.search(fixed):
+        fixed = _SEQ_RX.sub("", fixed)
+        if not fixed.strip():
+            return None, "phantom"
 
     # 修完还残留占位符 → 看是原文本来就没有（幽灵），还是编号越界
     residual = _PH_RX.findall(fixed) + _GL_RX.findall(fixed)
