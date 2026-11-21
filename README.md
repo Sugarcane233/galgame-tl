@@ -38,7 +38,7 @@
 ## 这是什么
 
 Linux 上一直缺一个能用的 galgame 汉化工具。Windows 上有 MTool，但它要 Wine、
-要会员、要联网校验，而且对 Ren'Py 的支持só一般。这个项目想解决三件事：
+要会员、要联网校验，而且对 Ren'Py 的支持很一般。这个项目想解决三件事：
 
 1. **Linux 原生**——不经过 Wine，直接读写游戏文件。Ren'Py 的 `.rpa`、
    RPG Maker 的 `.json` 和 `.rvdata2`、Unity 的 `.assets`，都能在 Linux 上直接处理。
