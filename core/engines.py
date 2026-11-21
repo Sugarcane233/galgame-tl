@@ -478,6 +478,43 @@ def _iter_ui_strings(path: Path):
         yield text.count("\n", 0, m.start()) + 1, "", txt
 
 
+def _cjk_face_index(path: str) -> Optional[int]:
+    """在 .ttc 字体集合里找简体中文（SC）那一张 face 的序号。
+
+    为什么必须指定序号：`NotoSansCJK-Regular.ttc` 是一个装了 10 张 face 的
+    字体集合，**index 0 是日文字形（JP）**。Ren'Py 的 `load_face` 默认
+    index=0（renpy/text/font.py:606），于是简体中文游戏会拿到一套日文字形：
+    「直/值/骨/写」这类字形差异明显，部分汉字在 JP face 里根本不存在对应
+    字形，直接渲染成空白。
+
+    Ren'Py 支持 `"2@filename.ttc"` 这种「序号 @ 文件名」写法
+    （renpy/text/font.py:608 解析），返回 2 即让它取 SC face。
+
+    探测不到（没有 pillow、不是 ttc、或集合里没有 SC）时返回 None，
+    调用方退回原来的无序号写法，行为与修复前一致。
+    """
+    if not path.lower().endswith(".ttc"):
+        return None
+    try:
+        from PIL import ImageFont
+    except Exception:
+        return None
+    # 优先按 family 名精确匹配；Noto 的 SC face 一般叫
+    # "Noto Sans CJK SC"，思源叫 "Source Han Sans SC"。
+    want = ("Noto Sans CJK SC", "Noto Serif CJK SC",
+            "Source Han Sans SC", "Source Han Serif SC",
+            "WenQuanYi Micro Hei", "AR PL UMing CN")
+    for i in range(32):
+        try:
+            ft = ImageFont.truetype(path, 12, index=i)
+            fam = (ft.getname() or ("",))[0] or ""
+        except Exception:
+            break          # 超出 face 数量，后面没有了
+        if fam in want:
+            return i
+    return None
+
+
 def _find_cjk_font() -> tuple[Optional[str], Optional[str]]:
     cands = [
         ("Noto Sans CJK SC", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
@@ -728,11 +765,26 @@ class RenPyAdapter(EngineAdapter):
                 txt = p.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
-            # 字体名可能带空格（"Hillstown Sans.ttf"），字符类比 \w 放宽
+            # 字体名可能带空格（"Hillstown Sans.ttf"），字符类比 \w 放宽。
+            # **必须同时注册「原样字符串」和 basename**：游戏里普遍写成
+            # "fonts/MetalMania-Regular.ttf"，而 Ren'Py 的
+            # config.font_replacement_map 按调用方传入的**原字符串**查表
+            # （renpy/text/font.py:678 `t = (fn, bold, italics)`），只注册
+            # basename 会整个失配 —— 实测 Betweensalvationandabyss 主菜单
+            # 六个按钮全用 "fonts/MetalMania-Regular.ttf"，失配后中文没有字形，
+            # 整排按钮文字变成空白，看上去就像「没有开始游戏的选项」。
             for m in re.finditer(r'"([\w/\- \.]+\.(?:ttf|otf|ttc|woff2?))"', txt):
-                orig.add(os.path.basename(m.group(1)))
+                full = m.group(1)
+                orig.add(full)
+                orig.add(os.path.basename(full))
 
         cjk = f"tl/{self.LANG}/cjk_font{ext}"
+        # .ttc 是字体集合，index 0 是日文字形；必须显式指定简体中文那一张。
+        # Ren'Py 用 `"<index>@<路径>"` 传 face 序号（renpy/text/font.py:608）。
+        face_idx = _cjk_face_index(path)
+        if face_idx is not None:
+            cjk = f"{face_idx}@{cjk}"
+            log(f"  cjk 字体取第 {face_idx} 张 face（简体中文字形）")
         with open(tl_root / "zz_font_patch.rpy", "w", encoding="utf-8") as f:
             f.write("# -*- coding: utf-8 -*-\n")
             f.write("init 999 python:\n")
