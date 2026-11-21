@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""galgame-tl 命令行入口（调试/批处理用，等价于 GUI 的「开始汉化」）
+
+用法
+----
+  ./gtl detect  "/path/to/GameDir"                 只识别引擎
+  ./gtl extract "/path/to/GameDir"                 只提取文本到 JSON
+  ./gtl apply   "/path/to/GameDir" out/xxx.json    用已有 JSON 回填
+  ./gtl run     "/path/to/GameDir" --base-url ... --model ...    全自动
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+
+# 如果不在项目 venv 里跑（系统 python 缺 UnityPy 等），自动切到 venv 的 python 重执行
+_VENV_PY = HERE / ".venv" / "bin" / "python"
+if (_VENV_PY.exists() and not sys.executable.startswith(str(HERE / ".venv"))
+        and not os.environ.get("GTL_REEXEC")):
+    os.environ["GTL_REEXEC"] = "1"
+    os.execv(str(_VENV_PY), [str(_VENV_PY), str(Path(__file__).resolve())] + sys.argv[1:])
+
+from core.detect import detect, normalize_input
+from core.engines import get_adapter
+from core.llm import Backend
+from core.pipeline import Pipeline, PipelineOptions
+
+
+def _emit(kind, payload):
+    if kind == "log":
+        print(payload, flush=True)
+    elif kind == "progress":
+        d, t = payload["done"], payload["total"]
+        if t:
+            print(f"  [{d}/{t}]", flush=True)
+
+
+def _load_glossary(p):
+    if not p:
+        return {}
+    path = Path(p)
+    # 配合 --auto-glossary 时这个路径可能还不存在（是要生成的目标），
+    # 不存在就当空表，不要报错。
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"术语表读不了（{e}），当成空表继续")
+        return {}
+
+
+def cmd_detect(a):
+    d = detect(a.target)
+    print(f"引擎    : {d.summary()}")
+    print(f"根目录  : {d.root}")
+    if d.launch:
+        print(f"启动入口: {d.launch}")
+    if d.data_dir:
+        print(f"数据目录: {d.data_dir}")
+    for e in d.evidence:
+        print(f"  · {e}")
+    for w in d.warnings:
+        print(f"  ! {w}")
+    return 0 if d.ok else 2
+
+
+def cmd_extract(a):
+    d = detect(a.target)
+    if not d.ok:
+        print(f"未识别引擎: {d.evidence}", file=sys.stderr)
+        return 2
+    ad = get_adapter(d.engine, d.variant)
+    ad.prepare(d.root, print)          # VX Ace 在这里解 rgss3a
+    items = ad.extract(d.root, print)
+    out = Path(a.out or f"{d.root.name}.text.json")
+    out.write_text(json.dumps({"meta": {"root": str(d.root), "engine": d.engine,
+                                        "count": len(items),
+                                        "unique": len({i["src"] for i in items})},
+                               "items": items}, ensure_ascii=False, indent=1),
+                   encoding="utf-8")
+    print(f"\n{len(items)} 条（唯一 {len({i['src'] for i in items})}）-> {out}")
+    return 0
+
+
+def cmd_apply(a):
+    d = detect(a.target)
+    if not d.ok:
+        print("未识别引擎", file=sys.stderr)
+        return 2
+    ad = get_adapter(d.engine, d.variant)
+    items = json.loads(Path(a.json).read_text(encoding="utf-8"))["items"]
+    n = ad.apply(d.root, items, print)
+    ad.finalize(d.root, print)
+    print(f"写入 {n} 条")
+    return 0
+
+
+def cmd_windows(a):
+    """把 Windows 版 Ren'Py 改成 Linux 原生可跑。"""
+    from core import winport
+    root = normalize_input(a.target) if a.target else None
+    if root is None:
+        return 2
+    det = detect(a.target)
+    if det.engine != "renpy":
+        print(f"识别为 {det.engine or '未知'}，不是 Ren'Py。")
+        tips = []
+        if det.engine == "rpgmaker":
+            tips = winport.rpgmaker_advice(root)
+        elif det.engine == "unity":
+            tips = winport.unity_advice(root)
+        else:
+            print("Windows 版怎么跑，见 README「Windows 游戏」一节。")
+        for t in tips:
+            print(t)
+        return 0 if tips else 1
+    src = Path(a.engine_src).expanduser() if a.engine_src else None
+    res = winport.port(root, engine_src=src, dry_run=a.dry_run)
+    print(res.summary())
+    for n in res.notes:
+        print("  · " + n)
+    if res.ok and res.launcher:
+        print(f"\n启动方式:  {res.launcher}")
+    return 0 if res.ok else 1
+
+
+def cmd_run(a):
+    wb = a.base_url.startswith("workbuddy:")
+    backend = Backend(
+        name=a.backend_name,
+        base_url=a.base_url,
+        model=a.model,
+        key=a.key,
+        timeout=a.timeout,
+        wb=wb,
+    )
+    opts = PipelineOptions(
+        target=a.target,
+        backend=backend,
+        glossary=_load_glossary(a.glossary),
+        batch_size=a.batch,
+        max_escalate=a.retries,
+        concurrency=a.concurrency,
+        out_dir=a.out_dir or "",
+        dry_run=a.dry_run,
+        auto_glossary=a.auto_glossary,
+        auto_glossary_save=a.glossary if a.auto_glossary and a.glossary else "",
+        glossary_min_freq=a.glossary_min_freq,
+        port_to_linux=getattr(a, "port_to_linux", False),
+        engine_src=getattr(a, "engine_src", "") or "",
+        nv_fallback=not getattr(a, "no_nv_fallback", False),
+        nv_model=getattr(a, "nv_model", "") or "",
+        gf_fallback=not getattr(a, "no_gf_fallback", False),
+        simplify=not getattr(a, "no_simplify", False),
+    )
+    r = Pipeline(opts, _emit).run()
+    print("\n" + "=" * 60)
+    print(r.summary())
+    if r.ported:
+        print("移植: " + r.ported)
+    if r.json_path:
+        print(f"提取结果: {r.json_path}")
+    return 0 if r.ok else 1
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="gtl", description="galgame 汉化工具（CLI）")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("detect", help="只识别引擎")
+    p.add_argument("target")
+    p.set_defaults(fn=cmd_detect)
+
+    p = sub.add_parser("extract", help="只提取文本")
+    p.add_argument("target")
+    p.add_argument("-o", "--out")
+    p.set_defaults(fn=cmd_extract)
+
+    p = sub.add_parser("apply", help="用已有 JSON 回填")
+    p.add_argument("target")
+    p.add_argument("json")
+    p.set_defaults(fn=cmd_apply)
+
+    p = sub.add_parser("run", help="全自动")
+    p.add_argument("target")
+    # 用 workbuddy: 走 WorkBuddy 直连（免 token），其他值当 OpenAI 兼容端点
+    p.add_argument("--base-url", default="workbuddy:",
+                   help="workbuddy: 走 WorkBuddy 直连；否则是 OpenAI 兼容端点")
+    p.add_argument("--model", default="deepseek-v4.1-flash")
+    p.add_argument("--key", default="")
+    p.add_argument("--backend-name", default="openai")
+    p.add_argument("--glossary")
+    p.add_argument("--auto-glossary", action="store_true",
+                   help="先用模型从台词里自动生成术语表再翻译"
+                        "（配合 --glossary 指定路径则写回该文件）")
+    p.add_argument("--glossary-min-freq", type=int, default=3,
+                   help="候选词至少出现几次才考虑（默认 3）")
+    p.add_argument("--batch", type=int, default=20)
+    p.add_argument("--retries", type=int, default=3)
+    p.add_argument("--timeout", type=int, default=180)
+    p.add_argument("--concurrency", type=int, default=4)
+    p.add_argument("--out-dir", default="")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--port-to-linux", action="store_true",
+                   help="Windows 版 Ren'Py：换成 Linux 引擎，本机原生跑（不需要 Wine）")
+    p.add_argument("--engine-src", default="",
+                   help="从哪个目录借 Linux 引擎（默认自动找本机其它 Ren'Py 游戏）")
+    p.add_argument("--no-nv-fallback", action="store_true",
+                   help="关掉 NVIDIA 兜底（默认开：主模型翻不了的露骨内容交给 Nemotron）")
+    p.add_argument("--nv-model", default="",
+                   help="兜底模型，默认 nvidia/nemotron-3-ultra-550b-a55b")
+    p.add_argument("--no-gf-fallback", action="store_true",
+                   help="关掉谷歌翻译兜底（第三道：前两道都拒的句子交给它）")
+    p.add_argument("--no-simplify", action="store_true",
+                   help="关掉收尾的繁转简清洗（默认开：把译文里混入的繁体统一成简体）")
+    p.set_defaults(fn=cmd_run)
+
+    p = sub.add_parser("windows", help="Windows 版 Ren'Py 改造成 Linux 原生可跑")
+    p.add_argument("target")
+    p.add_argument("--engine-src", default="", help="指定引擎来源目录")
+    p.add_argument("--dry-run", action="store_true", help="只看会做什么，不落盘")
+    p.set_defaults(fn=cmd_windows)
+
+    a = ap.parse_args()
+    sys.exit(a.fn(a))
+
+
+if __name__ == "__main__":
+    main()
