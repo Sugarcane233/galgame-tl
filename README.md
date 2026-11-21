@@ -1097,6 +1097,45 @@ unset WAYLAND_DISPLAY SDL_VIDEODRIVER
   --no-simplify                         # 关繁转简
 ```
 
+### 批量收尾脚本
+
+几万句的项目不适合一次跑完盯着看。`batch_run.sh` 是挂定时任务用的：
+
+```bash
+./batch_run.sh /path/to/GameDir [输出目录]
+```
+
+它做四件事：
+
+1. `flock` 防并发（定时任务和手动撞车会抢配额）
+2. 等别的 `gtl run` 进程结束再开始
+3. 跑一轮 `gtl run`（缓存命中直接跳过，所以随时能重跑）
+4. 统计并写状态文件 `<输出目录>/<游戏名>.status.txt`
+
+状态文件长这样：
+
+```
+state=done
+rc=0
+elapsed=223
+total=19250
+translated=19250
+deferred=0
+nv_fallback_calls=0
+applied=31449
+still_missing=0
+finished_at=2026-11-21 03:12:44
+```
+
+`still_missing` 是最准的口径——直接从缓存和 items 里算，不依赖日志解析。
+
+挂 cron：
+
+```bash
+# 每 30 分钟补一次，跑完就不再产出
+*/30 * * * * /path/to/galgame-tl/batch_run.sh /path/to/GameDir
+```
+
 ### 输出 JSON 结构
 
 `extract` 出来的 JSON 很直白，想人工精修就改这个再 `apply`：
