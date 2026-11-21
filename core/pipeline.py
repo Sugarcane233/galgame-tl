@@ -382,6 +382,18 @@ class Pipeline:
         if tr.gf_fallback:
             self.log("[翻译] 谷歌翻译兜底已启用（第三道）：前两道都拒的句子交给它，"
                      "人名仍走术语表")
+        # 历史缓存里可能留着旧版 protect/restore 的脏数据（占位符闭合符被模型
+        # 抄成形近字、控制码被吃掉）。不清的话这些句子命中缓存，脏译文会被
+        # 原样写回游戏。清洗器只删不猜，修不好的条目下次当未翻译重翻。
+        if tr.cache:
+            from . import cachefix
+            cleaned, cstats = cachefix.clean(tr.cache, self.opts.glossary)
+            n_bad = len(tr.cache) - len(cleaned)
+            if n_bad:
+                self.log(f"[缓存] 清洗出 {cstats.get('repaired', 0)} 条可修复、"
+                         f"{n_bad - cstats.get('repaired', 0)} 条需重翻，已更新缓存")
+                tr.cache = cleaned
+                tr._save_cache()
         self.log(f"[翻译] 模型 {self.opts.backend.model} @ {self.opts.backend.base_url}"
                  f"（{self.opts.concurrency} 路并发）")
         if self.opts.glossary:

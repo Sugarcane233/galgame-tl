@@ -310,7 +310,15 @@ class Backend:
 
 # ---------------------------------------------------------------- 占位符保护
 PROTECT_RULES = [
-    (re.compile(r"\\[VNPC]\[\d+\]", re.I), "RM_ESC"),        # RPG Maker \V[1]（必须先于方括号）
+    # RPG Maker 的 \js<表达式> / \format<..> / \item<..> 必须排在方括号规则前，
+    # 否则 \js[vulgar,pussy,0] 会被 RENPY_SUB 当成 [var] 吃掉前缀。
+    (re.compile(r"\\[A-Za-z]+<[^<>]*>"), "RM_JS"),
+    # 所有 \x[..] 形态：\c[2] \C[2] \V[36] \v[625] \N[1] \I[487] \FS[22] \n[6]
+    # 以及 \js[...]。旧规则只认 VNPC，\I \i \FS \n 全漏，实测 \I[487] 有 487 个。
+    (re.compile(r"\\[A-Za-z]+\[[^\[\]]*\]"), "RM_ESC"),
+    # 单字符转义：换行 \. 与停顿 \| 是 MZ 里最关键的排版控制，
+    # 本作 \. 出现 14153 次；\{ \} 控制字号（1475 次）。
+    (re.compile(r"\\[.{}|!^$ ]"), "RM_CTRL"),
     (re.compile(r"\[[^\[\]]{1,40}\]"), "RENPY_SUB"),         # Ren'Py [var]
     (re.compile(r"\{[^{}]{1,40}\}"), "RENPY_TAG"),           # {i}{w}{color=#fff}
     (re.compile(r"%\d+\$?[sdif]"), "PRINTF"),
@@ -330,9 +338,32 @@ def protect(s: str) -> tuple[str, dict[str, str]]:
     return s, store
 
 
+# 模型（尤其经过一轮中文重写）会把闭合符 ⟧(U+27E7) 抄成形近字符。
+# 实测清点一个真实项目的缓存（97260 条），⟦ 后面出现过的「闭合符」有：
+#   ⟧ U+27E7 1379  ◙ U+25D9 44  ◈ U+25C8 15  ◧ U+25E7 12  ◊ U+25CA 11
+#   ┦ U+2526 1    ◗ U+25D7 1    ┋ U+250B 1
+# 少一个没列进去，对应的占位符就永远换不回来，译文里留下「⟦0◧哈，才怪。」
+# 这种串直接写进游戏（实测 1701 条中招）。
+_PH_CLOSE = "⟧◧◨◩◪◫◈◊◉◙◗◖◚◛◜◝◞◟┦┋▣▤▥▦▧▨▩"
+_PH_RX = re.compile(rf"⟦(\d+)[{_PH_CLOSE}]")
+# ⟨G0⟩ 也会被抄成 ⟦G0⟧ 等，开括号与闭合符都要容错
+_GL_RX = re.compile(rf"[⟨⟦]G(\d+)[⟩{_PH_CLOSE}]")
+
+
 def restore(s: str, store: dict[str, str]) -> str:
-    for k, v in store.items():
-        s = s.replace(k, v)
+    """把 ⟦n⟧ 换回原文。
+
+    必须反复展开：PROTECT_RULES 是逐条规则依次 sub 的，后面的规则会把
+    前面刚生成的占位符一起吃掉（`[\\c[2]X\\c[0]]` 先出 ⟦0⟧/⟦1⟧，再整段
+    被 RENPY_SUB 包成 ⟦2⟧，值里还含 ⟦0⟧/⟦1⟧）。旧实现按 dict 插入序
+    replace，⟦2⟧ 排在最后，展开出来的 ⟦0⟧/⟦1⟧ 已经错过替换了。
+    """
+    for _ in range(6):
+        new = _PH_RX.sub(
+            lambda m: store.get(f"⟦{m.group(1)}⟧", m.group(0)), s)
+        if new == s:
+            break
+        s = new
     return s
 
 
@@ -347,8 +378,13 @@ def mask_glossary(s: str, gloss: dict[str, str]) -> tuple[str, dict[str, str]]:
 
 
 def unmask_glossary(s: str, gstore: dict[str, str]) -> str:
-    for k, v in gstore.items():
-        s = s.replace(k, v)
+    """把 ⟨Gn⟩ 换回译名。闭合符同样要容错：实测模型会输出 ⟧ 顶替 ⟩。"""
+    for _ in range(6):
+        new = _GL_RX.sub(
+            lambda m: gstore.get(f"⟨G{m.group(1)}⟩", m.group(0)), s)
+        if new == s:
+            break
+        s = new
     return s
 
 
