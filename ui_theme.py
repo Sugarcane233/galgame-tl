@@ -442,6 +442,11 @@ QPushButton#ghost:hover {{
     border-color: {BORDER_HI};
 }}
 
+QWidget#pageFooter {{
+    background: {CARD};
+    border-top: 1px solid {BORDER};
+}}
+
 /* ============================== 拖放区 ============================== */
 QFrame#dropzone {{
     background: {CARD_ALT};

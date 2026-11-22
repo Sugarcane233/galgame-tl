@@ -242,7 +242,7 @@ class MainWindow(QMainWindow):
         inner = QWidget()
         inner.setObjectName("pageRoot")
         lay = QVBoxLayout(inner)
-        lay.setContentsMargins(26, 22, 34, 22)
+        lay.setContentsMargins(26, 22, 34, 28)
         lay.setSpacing(14)
         if title:
             t = QLabel(title)
@@ -456,9 +456,10 @@ class MainWindow(QMainWindow):
 
         # 底部操作条：固定在页面底部（不随内容滚动），随时都能点开始
         footer = QWidget()
+        footer.setObjectName("pageFooter")
         fl = QVBoxLayout(footer)
-        fl.setContentsMargins(26, 12, 26, 18)
-        fl.setSpacing(10)
+        fl.setContentsMargins(26, 14, 26, 16)
+        fl.setSpacing(9)
 
         ops = QHBoxLayout()
         ops.setSpacing(10)
