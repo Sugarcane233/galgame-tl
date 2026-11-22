@@ -26,17 +26,48 @@ from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
     QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSpinBox,
-    QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget, QTextEdit,
 )
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core.detect import detect                       # noqa: E402
 from core.llm import Backend                          # noqa: E402
 from core.pipeline import Pipeline, PipelineOptions   # noqa: E402
+import ui_theme                                       # noqa: E402
 
 APP_NAME = "galgame-tl"
 ORG = "galgame-tl"
+
+
+def _init_palette(app: QApplication):
+    """给 QSS 覆盖不到的地方（占位符文字、选中的行等）补上深色调色板。
+
+    QSS 没有 ::placeholder 这类选择器，QLineEdit 的占位符颜色只能通过
+    QPalette.PlaceholderText 控制；不打这套调色板，深色底上会残留浅灰占位符。
+    """
+    from PySide6.QtGui import QColor, QPalette
+    pal = QPalette()
+    bg = QColor(ui_theme.BG)
+    card = QColor(ui_theme.CARD_HI)
+    text = QColor(ui_theme.TEXT)
+    dim = QColor(ui_theme.TEXT_MUTE)
+    pal.setColor(QPalette.Window, bg)
+    pal.setColor(QPalette.WindowText, text)
+    pal.setColor(QPalette.Base, card)
+    pal.setColor(QPalette.AlternateBase, QColor(ui_theme.CARD))
+    pal.setColor(QPalette.Text, text)
+    pal.setColor(QPalette.PlaceholderText, dim)
+    pal.setColor(QPalette.Button, card)
+    pal.setColor(QPalette.ButtonText, text)
+    pal.setColor(QPalette.Highlight, QColor(ui_theme.ACCENT))
+    pal.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+    pal.setColor(QPalette.ToolTipBase, QColor(ui_theme.CARD_HI))
+    pal.setColor(QPalette.ToolTipText, text)
+    pal.setColor(QPalette.Disabled, QPalette.Text, QColor(ui_theme.TEXT_MUTE))
+    pal.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(ui_theme.TEXT_MUTE))
+    pal.setColor(QPalette.Disabled, QPalette.WindowText, QColor(ui_theme.TEXT_MUTE))
+    app.setPalette(pal)
 
 
 # --------------------------------------------------------------- 工作线程
@@ -86,31 +117,49 @@ class DropZone(QFrame):
     def __init__(self):
         super().__init__()
         self.setAcceptDrops(True)
-        self.setFrameShape(QFrame.StyledPanel)
-        self.setMinimumHeight(96)
-        self.setStyleSheet("""
-            DropZone {
-                border: 2px dashed #5a5f6a;
-                border-radius: 10px;
-                background: rgba(90,95,106,0.08);
-            }
-            DropZone[hover="true"] {
-                border-color: #4a9eff;
-                background: rgba(74,158,255,0.12);
-            }
+        self.setFrameShape(QFrame.NoFrame)
+        self.setObjectName("dropzone")
+        self.setMinimumHeight(110)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setStyleSheet(f"""
+            QFrame#dropzone {{
+                border: 1.5px dashed {ui_theme.BORDER_HI};
+                border-radius: 12px;
+                background: rgba(23, 27, 35, 0.7);
+            }}
+            QFrame#dropzone[hover="true"] {{
+                border: 1.5px dashed {ui_theme.ACCENT};
+                background: rgba(79, 140, 255, 0.10);
+            }}
         """)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setContentsMargins(18, 16, 18, 16)
+        lay.setSpacing(6)
+
+        self.icon = QLabel("⤓")
+        self.icon.setAlignment(Qt.AlignCenter)
+        self.icon.setStyleSheet(
+            f"color:{ui_theme.ACCENT}; font-size:26px; background:transparent;")
+        lay.addWidget(self.icon)
+
         self.title = QLabel("把游戏目录 / 启动文件拖到这里")
         f = QFont()
         f.setPointSize(12)
+        f.setBold(True)
         self.title.setFont(f)
         self.title.setAlignment(Qt.AlignCenter)
-        self.hint = QLabel("支持 Ren'Py · RPG Maker MV/MZ · Unity（Linux / Windows 版都行）")
+        self.title.setStyleSheet(f"color:{ui_theme.TEXT}; background:transparent;")
+        self.hint = QLabel("支持 Ren'Py · RPG Maker MV/MZ · VX Ace · Unity（Linux / Windows 版都行）")
         self.hint.setAlignment(Qt.AlignCenter)
-        self.hint.setStyleSheet("color:#8a909a;")
+        self.hint.setStyleSheet(
+            f"color:{ui_theme.TEXT_MUTE}; font-size:12px; background:transparent;")
         lay.addWidget(self.title)
         lay.addWidget(self.hint)
+
+    def mousePressEvent(self, e):
+        # 拖放区兼作按钮：点一下也能选目录（拖放不是每个人都会想到）
+        self.window().on_pick_dir()
+        super().mousePressEvent(e)
 
     def dragEnterEvent(self, e: QDragEnterEvent):
         if e.mimeData().hasUrls():
@@ -161,12 +210,20 @@ class MainWindow(QMainWindow):
             self._autodetect_gateway()
 
     # ------------------------------------------------------------ UI
+    def _field_label(self, text: str) -> QLabel:
+        """表单左侧的字段名。右对齐 + 次要色，跟输入框拉开层次。"""
+        lbl = QLabel(text)
+        lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lbl.setStyleSheet(
+            f"color:{ui_theme.TEXT_DIM}; font-size:12px; background:transparent;")
+        return lbl
+
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setContentsMargins(14, 14, 14, 14)
-        root.setSpacing(10)
+        root.setContentsMargins(18, 16, 18, 16)
+        root.setSpacing(12)
 
         # 1) 拖放区
         self.drop = DropZone()
@@ -174,12 +231,16 @@ class MainWindow(QMainWindow):
         root.addWidget(self.drop)
 
         pick = QHBoxLayout()
+        pick.setSpacing(8)
+        lbl = QLabel("目标")
+        lbl.setStyleSheet(f"color:{ui_theme.TEXT_DIM}; font-size:12px;")
+        pick.addWidget(lbl)
         self.path_edit = QLineEdit()
         self.path_edit.setPlaceholderText("或手动选择游戏目录…")
         self.path_edit.setReadOnly(True)
-        btn_pick = QPushButton("选择目录…")
+        btn_pick = QPushButton("选择目录")
+        btn_pick.setObjectName("ghost")
         btn_pick.clicked.connect(self.on_pick_dir)
-        pick.addWidget(QLabel("目标:"))
         pick.addWidget(self.path_edit, 1)
         pick.addWidget(btn_pick)
         root.addLayout(pick)
@@ -187,23 +248,28 @@ class MainWindow(QMainWindow):
         # 2) 识别结果
         self.info = QLabel("等待拖入游戏…")
         self.info.setWordWrap(True)
-        self.info.setStyleSheet("""
-            QLabel {
-                background: rgba(74,158,255,0.08);
-                border: 1px solid rgba(74,158,255,0.35);
+        self.info.setObjectName("infobox")
+        self.info.setStyleSheet(f"""
+            QLabel#infobox {{
+                background: rgba(79, 140, 255, 0.07);
+                border: 1px solid rgba(79, 140, 255, 0.28);
+                border-left: 3px solid {ui_theme.ACCENT};
                 border-radius: 8px;
-                padding: 8px 12px;
-            }
+                padding: 10px 14px;
+                color: {ui_theme.TEXT_DIM};
+            }}
         """)
         root.addWidget(self.info)
 
         # 3) 模型配置
         gb_model = QGroupBox("翻译模型")
         ml = QGridLayout(gb_model)
+        ml.setHorizontalSpacing(10)
+        ml.setVerticalSpacing(10)
         ml.setColumnStretch(1, 1)
         ml.setColumnStretch(3, 1)
 
-        ml.addWidget(QLabel("来源:"), 0, 0)
+        ml.addWidget(self._field_label("来源"), 0, 0)
         self.source_combo = QComboBox()
         self.source_combo.addItems([
             "WorkBuddy（直连，免 token）",
@@ -213,33 +279,36 @@ class MainWindow(QMainWindow):
         self.source_combo.currentIndexChanged.connect(self._on_source_changed)
         ml.addWidget(self.source_combo, 0, 1)
 
-        ml.addWidget(QLabel("Base URL:"), 1, 0)
+        ml.addWidget(self._field_label("Base URL"), 1, 0)
         self.base_edit = QLineEdit()
         self.base_edit.setPlaceholderText("http://127.0.0.1:11434/v1")
         ml.addWidget(self.base_edit, 1, 1, 1, 3)
 
-        ml.addWidget(QLabel("模型:"), 2, 0)
+        ml.addWidget(self._field_label("模型"), 2, 0)
         self.model_combo = QComboBox()
         self.model_combo.setEditable(True)
         self.model_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         ml.addWidget(self.model_combo, 2, 1)
 
-        ml.addWidget(QLabel("API Key:"), 2, 2)
+        ml.addWidget(self._field_label("API Key"), 2, 2)
         self.key_edit = QLineEdit()
         self.key_edit.setEchoMode(QLineEdit.Password)
         self.key_edit.setPlaceholderText("sk-…（本地端点可留空）")
         ml.addWidget(self.key_edit, 2, 3)
 
         btn_probe = QPushButton("探测 / 刷新模型")
+        btn_probe.setObjectName("ghost")
         btn_probe.clicked.connect(self.on_probe)
         ml.addWidget(btn_probe, 3, 3)
 
-        self.glossary_btn = QPushButton(f"术语表（{len(self.glossary)} 条）")
+        self.glossary_btn = QPushButton(f"术语表 · {len(self.glossary)} 条")
+        self.glossary_btn.setObjectName("ghost")
         self.glossary_btn.setToolTip("手动编辑术语表（原文 = 译文，一行一条）")
         self.glossary_btn.clicked.connect(self.on_glossary)
         ml.addWidget(self.glossary_btn, 3, 1)
 
         self.auto_gloss_btn = QPushButton("自动生成术语表")
+        self.auto_gloss_btn.setObjectName("ghost")
         self.auto_gloss_btn.setToolTip(
             "先用模型看完台词里的专有名词（人名/地名/招式），生成术语表再翻译。\n"
             "需要先拖入游戏并选好模型——要先提取文本才能分析。")
@@ -250,29 +319,45 @@ class MainWindow(QMainWindow):
 
         # 4) 选项
         gb_opt = QGroupBox("选项")
-        ol = QHBoxLayout(gb_opt)
+        ov = QVBoxLayout(gb_opt)
+        ov.setSpacing(12)
+
+        # 第一行：三个数值参数
+        ol = QHBoxLayout()
+        ol.setSpacing(8)
         self.batch_spin = QSpinBox()
         self.batch_spin.setRange(1, 100)
         self.batch_spin.setValue(20)
-        ol.addWidget(QLabel("每批句数:"))
+        self.batch_spin.setFixedWidth(78)
+        ol.addWidget(self._field_label("每批句数"))
         ol.addWidget(self.batch_spin)
 
+        ol.addSpacing(16)
         self.ab_spin = QSpinBox()
         self.ab_spin.setRange(1, 5)
         self.ab_spin.setValue(3)
-        ol.addWidget(QLabel("防拒绝重试:"))
+        self.ab_spin.setFixedWidth(70)
+        ol.addWidget(self._field_label("防拒绝重试"))
         ol.addWidget(self.ab_spin)
 
+        ol.addSpacing(16)
         self.conc_spin = QSpinBox()
         self.conc_spin.setRange(1, 16)
         self.conc_spin.setValue(4)
+        self.conc_spin.setFixedWidth(70)
         self.conc_spin.setToolTip("同时发出的请求数。串行翻两万句要十几小时，"
                                   "4 路实测不触发限速；被限速就降到 2。")
-        ol.addWidget(QLabel("并发:"))
+        ol.addWidget(self._field_label("并发"))
         ol.addWidget(self.conc_spin)
+        ol.addStretch(1)
+        ov.addLayout(ol)
+
+        # 第二行：开关类
+        oc = QHBoxLayout()
+        oc.setSpacing(18)
 
         self.dry_check = QCheckBox("只翻译不写回（预览）")
-        ol.addWidget(self.dry_check)
+        oc.addWidget(self.dry_check)
 
         self.nv_check = QCheckBox("NVIDIA 兜底")
         self.nv_check.setChecked(True)
@@ -281,7 +366,7 @@ class MainWindow(QMainWindow):
             "实测约 3% 的台词过不去。勾上就把这些句子交给 NVIDIA 的\n"
             "nemotron-3-ultra——它同样带术语表和前后文，译名与语气能接上。\n"
             "key 自动从 DSH 凭据里读，读不到就自动关掉。")
-        ol.addWidget(self.nv_check)
+        oc.addWidget(self.nv_check)
 
         self.gf_check = QCheckBox("谷歌翻译兜底")
         self.gf_check.setChecked(True)
@@ -290,7 +375,7 @@ class MainWindow(QMainWindow):
             "机器翻译不过滤文学性描写，剩下的露骨句它能翻（实测 60/60 全过）；\n"
             "质量比大模型差一档，但比留英文强。人名照样走术语表占位符。\n"
             "需要能连上谷歌（自动探环境变量代理与本机 7890 端口）。")
-        ol.addWidget(self.gf_check)
+        oc.addWidget(self.gf_check)
 
         self.simp_check = QCheckBox("繁转简清洗")
         self.simp_check.setChecked(True)
@@ -298,7 +383,7 @@ class MainWindow(QMainWindow):
             "模型偶尔会在中文长句里滑到繁体（实测 TLS 8483 条译文有 1047 条混了繁体字）。\n"
             "勾上就在收尾时统一转成大陆简体，连词汇一起转（软体→软件、网路→网络）。\n"
             "需要 zhconv 库。")
-        ol.addWidget(self.simp_check)
+        oc.addWidget(self.simp_check)
 
         self.port_check = QCheckBox("Windows 版改造成 Linux 原生跑")
         self.port_check.setToolTip(
@@ -306,21 +391,27 @@ class MainWindow(QMainWindow):
             "勾上就从本机其它 Ren'Py 游戏借一份 lib/py3-linux-*，直接原生运行——"
             "不是 Wine 转译，帧率和原生版一样。\n"
             "只在识别到 Windows 版 Ren'Py 时生效。")
-        ol.addWidget(self.port_check)
-        ol.addStretch(1)
+        oc.addWidget(self.port_check)
+        oc.addStretch(1)
+        ov.addLayout(oc)
+
         root.addWidget(gb_opt)
 
         # 5) 操作按钮
         ops = QHBoxLayout()
+        ops.setSpacing(10)
         self.btn_start = QPushButton("开始汉化")
-        self.btn_start.setMinimumHeight(38)
-        f = QFont(); f.setPointSize(11); f.setBold(True)
-        self.btn_start.setFont(f)
+        self.btn_start.setObjectName("primary")
+        self.btn_start.setMinimumHeight(46)
+        self.btn_start.setCursor(Qt.PointingHandCursor)
         self.btn_start.clicked.connect(self.on_start)
         self.btn_stop = QPushButton("取消")
+        self.btn_stop.setObjectName("secondary")
+        self.btn_stop.setMinimumHeight(46)
+        self.btn_stop.setCursor(Qt.PointingHandCursor)
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self.on_stop)
-        ops.addWidget(self.btn_start, 2)
+        ops.addWidget(self.btn_start, 3)
         ops.addWidget(self.btn_stop, 1)
         root.addLayout(ops)
 
@@ -330,15 +421,14 @@ class MainWindow(QMainWindow):
         self.bar.setValue(0)
         self.bar.setTextVisible(True)
         self.bar.setFormat("%p%")
+        self.bar.setFixedHeight(16)
         root.addWidget(self.bar)
 
         # 7) 日志
         self.log_view = QPlainTextEdit()
+        self.log_view.setObjectName("log")
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
-        mono = QFont("monospace", 9)
-        mono.setStyleHint(QFont.Monospace)
-        self.log_view.setFont(mono)
         root.addWidget(self.log_view, 1)
 
     # ---------------------------------------------------------- 术语表
@@ -862,6 +952,11 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG)
+    # Fusion 是唯一在所有平台上都尊重 QSS 的内置样式；
+    # 用系统原生样式（Windows / macOS）会让自绘控件半途而废。
+    app.setStyle("Fusion")
+    _init_palette(app)
+    app.setStyleSheet(ui_theme.QSS)
     w = MainWindow()
     w.show()
     sys.exit(app.exec())
