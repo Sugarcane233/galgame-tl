@@ -24,9 +24,9 @@ from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QFont
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSpinBox,
-    QVBoxLayout, QWidget, QTextEdit,
+    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
+    QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -35,6 +35,7 @@ from core.detect import detect                       # noqa: E402
 from core.llm import Backend                          # noqa: E402
 from core.pipeline import Pipeline, PipelineOptions   # noqa: E402
 import ui_theme                                       # noqa: E402
+from ui_widgets import Card, ProgressRing, Sidebar, StatCard   # noqa: E402
 
 APP_NAME = "galgame-tl"
 ORG = "galgame-tl"
@@ -49,20 +50,20 @@ def _init_palette(app: QApplication):
     from PySide6.QtGui import QColor, QPalette
     pal = QPalette()
     bg = QColor(ui_theme.BG)
-    card = QColor(ui_theme.CARD_HI)
+    card = QColor(ui_theme.CARD_ALT)
     text = QColor(ui_theme.TEXT)
     dim = QColor(ui_theme.TEXT_MUTE)
     pal.setColor(QPalette.Window, bg)
     pal.setColor(QPalette.WindowText, text)
     pal.setColor(QPalette.Base, card)
-    pal.setColor(QPalette.AlternateBase, QColor(ui_theme.CARD))
+    pal.setColor(QPalette.AlternateBase, QColor(ui_theme.CARD_ALT))
     pal.setColor(QPalette.Text, text)
     pal.setColor(QPalette.PlaceholderText, dim)
     pal.setColor(QPalette.Button, card)
     pal.setColor(QPalette.ButtonText, text)
     pal.setColor(QPalette.Highlight, QColor(ui_theme.ACCENT))
     pal.setColor(QPalette.HighlightedText, QColor("#ffffff"))
-    pal.setColor(QPalette.ToolTipBase, QColor(ui_theme.CARD_HI))
+    pal.setColor(QPalette.ToolTipBase, QColor(ui_theme.CARD))
     pal.setColor(QPalette.ToolTipText, text)
     pal.setColor(QPalette.Disabled, QPalette.Text, QColor(ui_theme.TEXT_MUTE))
     pal.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(ui_theme.TEXT_MUTE))
@@ -119,80 +120,77 @@ class DropZone(QFrame):
         self.setAcceptDrops(True)
         self.setFrameShape(QFrame.NoFrame)
         self.setObjectName("dropzone")
-        self.setMinimumHeight(110)
+        self.setMinimumHeight(148)
         self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet(f"""
-            QFrame#dropzone {{
-                border: 1.5px dashed {ui_theme.BORDER_HI};
-                border-radius: 12px;
-                background: rgba(23, 27, 35, 0.7);
-            }}
-            QFrame#dropzone[hover="true"] {{
-                border: 1.5px dashed {ui_theme.ACCENT};
-                background: rgba(79, 140, 255, 0.10);
-            }}
-        """)
+
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(18, 16, 18, 16)
-        lay.setSpacing(6)
+        lay.setContentsMargins(24, 24, 24, 24)
+        lay.setSpacing(8)
 
         self.icon = QLabel("⤓")
         self.icon.setAlignment(Qt.AlignCenter)
         self.icon.setStyleSheet(
-            f"color:{ui_theme.ACCENT}; font-size:26px; background:transparent;")
+            f"color:{ui_theme.ACCENT}; font-size:30px; background:transparent;")
         lay.addWidget(self.icon)
 
-        self.title = QLabel("把游戏目录 / 启动文件拖到这里")
+        self.title = QLabel("把游戏目录拖到这里")
         f = QFont()
         f.setPointSize(12)
         f.setBold(True)
         self.title.setFont(f)
         self.title.setAlignment(Qt.AlignCenter)
         self.title.setStyleSheet(f"color:{ui_theme.TEXT}; background:transparent;")
-        self.hint = QLabel("支持 Ren'Py · RPG Maker MV/MZ · VX Ace · Unity（Linux / Windows 版都行）")
+        lay.addWidget(self.title)
+
+        self.hint = QLabel("也可以点一下选择目录 · 支持 Ren'Py / RPG Maker MV·MZ·VX Ace / Unity")
         self.hint.setAlignment(Qt.AlignCenter)
         self.hint.setStyleSheet(
             f"color:{ui_theme.TEXT_MUTE}; font-size:12px; background:transparent;")
-        lay.addWidget(self.title)
         lay.addWidget(self.hint)
 
     def mousePressEvent(self, e):
-        # 拖放区兼作按钮：点一下也能选目录（拖放不是每个人都会想到）
+        # 拖放区兼作按钮：不是每个人都会想到往窗口里拖
         self.window().on_pick_dir()
         super().mousePressEvent(e)
 
     def dragEnterEvent(self, e: QDragEnterEvent):
         if e.mimeData().hasUrls():
             e.acceptProposedAction()
-            self.setProperty("hover", True)
-            self.style().unpolish(self); self.style().polish(self)
+            self._set_hover(True)
 
     def dragLeaveEvent(self, e):
-        self.setProperty("hover", False)
-        self.style().unpolish(self); self.style().polish(self)
+        self._set_hover(False)
 
     def dropEvent(self, e: QDropEvent):
-        self.setProperty("hover", False)
-        self.style().unpolish(self); self.style().polish(self)
+        self._set_hover(False)
         for url in e.mimeData().urls():
-            p = url.toLocalFile()
+            p = str(url.toLocalFile())
             if p:
                 self.dropped.emit(p)
                 break
 
+    def _set_hover(self, on: bool):
+        self.setProperty("hover", on)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
-# ------------------------------------------------------------------- 主窗
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("galgame-tl · galgame 汉化工具")
-        self.resize(1040, 760)
+        self.resize(1180, 820)
+        self.setMinimumSize(980, 680)
         self.settings = QSettings(ORG, APP_NAME)
         self.worker: Worker | None = None
         self.thread: QThread | None = None
         self.current_target = ""
         self.detection = None
         self.glossary: dict[str, str] = self._load_glossary_file()
+
+        # 运行页的实时统计（on_progress 里更新）
+        self._t0 = 0.0
+        self._stage_name = ""
 
         self._build_ui()
         self._load_settings()
@@ -210,60 +208,122 @@ class MainWindow(QMainWindow):
             self._autodetect_gateway()
 
     # ------------------------------------------------------------ UI
-    def _field_label(self, text: str) -> QLabel:
-        """表单左侧的字段名。右对齐 + 次要色，跟输入框拉开层次。"""
+    def _field_label(self, text: str, width: int = 86) -> QLabel:
+        """表单左侧字段名：竖向居中、次要色、固定宽度让冒号对齐。"""
         lbl = QLabel(text)
         lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lbl.setFixedWidth(width)
         lbl.setStyleSheet(
             f"color:{ui_theme.TEXT_DIM}; font-size:12px; background:transparent;")
         return lbl
 
+    def _hline(self) -> QFrame:
+        line = QFrame()
+        line.setObjectName("hline")
+        line.setFrameShape(QFrame.NoFrame)
+        return line
+
+    def _new_page(self, title: str, desc: str = "") -> tuple[QWidget, QVBoxLayout]:
+        """建一个可滚动的空白页并挂到 stack，返回 (外层页面, 内容布局)。
+
+        内容比窗口高时（小窗口 / 笔记本屏）必须能滚，否则底部按钮会被裁掉。
+        """
+        outer = QWidget()
+        outer.setObjectName("pageRoot")
+        outer_lay = QVBoxLayout(outer)
+        outer_lay.setContentsMargins(0, 0, 0, 0)
+        outer_lay.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        inner = QWidget()
+        inner.setObjectName("pageRoot")
+        lay = QVBoxLayout(inner)
+        lay.setContentsMargins(26, 22, 34, 22)
+        lay.setSpacing(14)
+        if title:
+            t = QLabel(title)
+            t.setObjectName("pageTitle")
+            lay.addWidget(t)
+        if desc:
+            d = QLabel(desc)
+            d.setObjectName("pageDesc")
+            d.setWordWrap(True)
+            lay.addWidget(d)
+
+        scroll.setWidget(inner)
+        outer_lay.addWidget(scroll, 1)
+        self.stack.addWidget(outer)
+        self._page_outer = outer_lay
+        return outer, lay
+
+    def _goto_page(self, idx: int):
+        self.stack.setCurrentIndex(idx)
+
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(18, 16, 18, 16)
-        root.setSpacing(12)
+        row = QHBoxLayout(central)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
 
-        # 1) 拖放区
+        # ---- 左侧导航
+        self.nav = Sidebar()
+        self.nav.page_changed.connect(self._goto_page)
+        row.addWidget(self.nav)
+
+        self.stack = QStackedWidget()
+        row.addWidget(self.stack, 1)
+
+        self._build_page_project()
+        self._build_page_run()
+        self._build_page_settings()
+
+        self.nav.add_group("任务")
+        self.nav.add_page("项目", "folder")
+        self.nav.add_page("运行", "play")
+        self.nav.add_group("其它")
+        self.nav.add_page("设置", "settings")
+        self.nav.finish()
+        self.nav.select(0)
+
+    # ---------------------------------------------------------- 页 1：项目
+    def _build_page_project(self):
+        page, root = self._new_page(
+            "项目",
+            "把游戏目录拖进来，识别引擎 → 提取文本 → 翻译 → 回填，一条龙。")
+
+        # 拖放 + 路径
+        c1 = Card("游戏目录", "支持 Ren'Py / RPG Maker MV·MZ·VX Ace / Unity")
         self.drop = DropZone()
         self.drop.dropped.connect(self.on_drop)
-        root.addWidget(self.drop)
+        c1.body.addWidget(self.drop)
 
         pick = QHBoxLayout()
         pick.setSpacing(8)
-        lbl = QLabel("目标")
-        lbl.setStyleSheet(f"color:{ui_theme.TEXT_DIM}; font-size:12px;")
-        pick.addWidget(lbl)
         self.path_edit = QLineEdit()
-        self.path_edit.setPlaceholderText("或手动选择游戏目录…")
+        self.path_edit.setPlaceholderText("还没有选择目录…")
         self.path_edit.setReadOnly(True)
         btn_pick = QPushButton("选择目录")
         btn_pick.setObjectName("ghost")
         btn_pick.clicked.connect(self.on_pick_dir)
         pick.addWidget(self.path_edit, 1)
         pick.addWidget(btn_pick)
-        root.addLayout(pick)
+        c1.body.addLayout(pick)
 
-        # 2) 识别结果
         self.info = QLabel("等待拖入游戏…")
         self.info.setWordWrap(True)
         self.info.setObjectName("infobox")
-        self.info.setStyleSheet(f"""
-            QLabel#infobox {{
-                background: rgba(79, 140, 255, 0.07);
-                border: 1px solid rgba(79, 140, 255, 0.28);
-                border-left: 3px solid {ui_theme.ACCENT};
-                border-radius: 8px;
-                padding: 10px 14px;
-                color: {ui_theme.TEXT_DIM};
-            }}
-        """)
-        root.addWidget(self.info)
+        c1.body.addWidget(self.info)
+        root.addWidget(c1)
 
-        # 3) 模型配置
-        gb_model = QGroupBox("翻译模型")
-        ml = QGridLayout(gb_model)
+        # 模型配置
+        c2 = Card("翻译模型", "主模型负责正文；两道兜底只在前一道拒绝时才上场。",
+                  "translate")
+        ml = QGridLayout()
         ml.setHorizontalSpacing(10)
         ml.setVerticalSpacing(10)
         ml.setColumnStretch(1, 1)
@@ -277,7 +337,7 @@ class MainWindow(QMainWindow):
             "OpenAI 兼容（自定义）",
         ])
         self.source_combo.currentIndexChanged.connect(self._on_source_changed)
-        ml.addWidget(self.source_combo, 0, 1)
+        ml.addWidget(self.source_combo, 0, 1, 1, 3)
 
         ml.addWidget(self._field_label("Base URL"), 1, 0)
         self.base_edit = QLineEdit()
@@ -290,7 +350,7 @@ class MainWindow(QMainWindow):
         self.model_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         ml.addWidget(self.model_combo, 2, 1)
 
-        ml.addWidget(self._field_label("API Key"), 2, 2)
+        ml.addWidget(self._field_label("API Key", 72), 2, 2)
         self.key_edit = QLineEdit()
         self.key_edit.setEchoMode(QLineEdit.Password)
         self.key_edit.setPlaceholderText("sk-…（本地端点可留空）")
@@ -299,13 +359,7 @@ class MainWindow(QMainWindow):
         btn_probe = QPushButton("探测 / 刷新模型")
         btn_probe.setObjectName("ghost")
         btn_probe.clicked.connect(self.on_probe)
-        ml.addWidget(btn_probe, 3, 3)
-
-        self.glossary_btn = QPushButton(f"术语表 · {len(self.glossary)} 条")
-        self.glossary_btn.setObjectName("ghost")
-        self.glossary_btn.setToolTip("手动编辑术语表（原文 = 译文，一行一条）")
-        self.glossary_btn.clicked.connect(self.on_glossary)
-        ml.addWidget(self.glossary_btn, 3, 1)
+        ml.addWidget(btn_probe, 3, 1, 1, 2)
 
         self.auto_gloss_btn = QPushButton("自动生成术语表")
         self.auto_gloss_btn.setObjectName("ghost")
@@ -313,51 +367,53 @@ class MainWindow(QMainWindow):
             "先用模型看完台词里的专有名词（人名/地名/招式），生成术语表再翻译。\n"
             "需要先拖入游戏并选好模型——要先提取文本才能分析。")
         self.auto_gloss_btn.clicked.connect(self.on_auto_glossary)
-        ml.addWidget(self.auto_gloss_btn, 3, 2)
+        ml.addWidget(self.auto_gloss_btn, 3, 3)
+        c2.body.addLayout(ml)
+        root.addWidget(c2)
 
-        root.addWidget(gb_model)
-
-        # 4) 选项
-        gb_opt = QGroupBox("选项")
-        ov = QVBoxLayout(gb_opt)
-        ov.setSpacing(12)
-
-        # 第一行：三个数值参数
+        # 选项
+        c3 = Card("翻译选项", "数值影响速度与配额消耗；开关决定要不要兜底。",
+                  "settings")
         ol = QHBoxLayout()
-        ol.setSpacing(8)
+        ol.setSpacing(10)
         self.batch_spin = QSpinBox()
         self.batch_spin.setRange(1, 100)
         self.batch_spin.setValue(20)
-        self.batch_spin.setFixedWidth(78)
-        ol.addWidget(self._field_label("每批句数"))
+        self.batch_spin.setFixedWidth(84)
+        ol.addWidget(self._field_label("每批句数", 64))
         ol.addWidget(self.batch_spin)
 
-        ol.addSpacing(16)
+        ol.addSpacing(18)
         self.ab_spin = QSpinBox()
         self.ab_spin.setRange(1, 5)
         self.ab_spin.setValue(3)
-        self.ab_spin.setFixedWidth(70)
-        ol.addWidget(self._field_label("防拒绝重试"))
+        self.ab_spin.setFixedWidth(76)
+        ol.addWidget(self._field_label("重试", 34))
         ol.addWidget(self.ab_spin)
 
-        ol.addSpacing(16)
+        ol.addSpacing(18)
         self.conc_spin = QSpinBox()
         self.conc_spin.setRange(1, 16)
         self.conc_spin.setValue(4)
-        self.conc_spin.setFixedWidth(70)
+        self.conc_spin.setFixedWidth(76)
         self.conc_spin.setToolTip("同时发出的请求数。串行翻两万句要十几小时，"
                                   "4 路实测不触发限速；被限速就降到 2。")
-        ol.addWidget(self._field_label("并发"))
+        ol.addWidget(self._field_label("并发", 34))
         ol.addWidget(self.conc_spin)
         ol.addStretch(1)
-        ov.addLayout(ol)
+        c3.body.addLayout(ol)
 
-        # 第二行：开关类
-        oc = QHBoxLayout()
-        oc.setSpacing(18)
+        c3.body.addWidget(self._hline())
+
+        oc = QGridLayout()
+        oc.setHorizontalSpacing(24)
+        oc.setVerticalSpacing(6)
+        oc.setColumnStretch(0, 1)
+        oc.setColumnStretch(1, 1)
 
         self.dry_check = QCheckBox("只翻译不写回（预览）")
-        oc.addWidget(self.dry_check)
+        self.dry_check.setToolTip("跑完全程但不修改游戏文件，先看看译文质量。")
+        oc.addWidget(self.dry_check, 0, 0)
 
         self.nv_check = QCheckBox("NVIDIA 兜底")
         self.nv_check.setChecked(True)
@@ -366,7 +422,7 @@ class MainWindow(QMainWindow):
             "实测约 3% 的台词过不去。勾上就把这些句子交给 NVIDIA 的\n"
             "nemotron-3-ultra——它同样带术语表和前后文，译名与语气能接上。\n"
             "key 自动从 DSH 凭据里读，读不到就自动关掉。")
-        oc.addWidget(self.nv_check)
+        oc.addWidget(self.nv_check, 0, 1)
 
         self.gf_check = QCheckBox("谷歌翻译兜底")
         self.gf_check.setChecked(True)
@@ -375,7 +431,7 @@ class MainWindow(QMainWindow):
             "机器翻译不过滤文学性描写，剩下的露骨句它能翻（实测 60/60 全过）；\n"
             "质量比大模型差一档，但比留英文强。人名照样走术语表占位符。\n"
             "需要能连上谷歌（自动探环境变量代理与本机 7890 端口）。")
-        oc.addWidget(self.gf_check)
+        oc.addWidget(self.gf_check, 1, 0)
 
         self.simp_check = QCheckBox("繁转简清洗")
         self.simp_check.setChecked(True)
@@ -383,7 +439,7 @@ class MainWindow(QMainWindow):
             "模型偶尔会在中文长句里滑到繁体（实测 TLS 8483 条译文有 1047 条混了繁体字）。\n"
             "勾上就在收尾时统一转成大陆简体，连词汇一起转（软体→软件、网路→网络）。\n"
             "需要 zhconv 库。")
-        oc.addWidget(self.simp_check)
+        oc.addWidget(self.simp_check, 1, 1)
 
         self.port_check = QCheckBox("Windows 版改造成 Linux 原生跑")
         self.port_check.setToolTip(
@@ -391,45 +447,117 @@ class MainWindow(QMainWindow):
             "勾上就从本机其它 Ren'Py 游戏借一份 lib/py3-linux-*，直接原生运行——"
             "不是 Wine 转译，帧率和原生版一样。\n"
             "只在识别到 Windows 版 Ren'Py 时生效。")
-        oc.addWidget(self.port_check)
-        oc.addStretch(1)
-        ov.addLayout(oc)
+        oc.addWidget(self.port_check, 2, 0, 1, 2)
 
-        root.addWidget(gb_opt)
+        c3.body.addLayout(oc)
+        root.addWidget(c3)
 
-        # 5) 操作按钮
+        root.addStretch(1)
+
+        # 底部操作条：固定在页面底部（不随内容滚动），随时都能点开始
+        footer = QWidget()
+        fl = QVBoxLayout(footer)
+        fl.setContentsMargins(26, 12, 26, 18)
+        fl.setSpacing(10)
+
         ops = QHBoxLayout()
         ops.setSpacing(10)
         self.btn_start = QPushButton("开始汉化")
         self.btn_start.setObjectName("primary")
-        self.btn_start.setMinimumHeight(46)
+        self.btn_start.setMinimumHeight(44)
         self.btn_start.setCursor(Qt.PointingHandCursor)
         self.btn_start.clicked.connect(self.on_start)
         self.btn_stop = QPushButton("取消")
         self.btn_stop.setObjectName("secondary")
-        self.btn_stop.setMinimumHeight(46)
+        self.btn_stop.setMinimumHeight(44)
         self.btn_stop.setCursor(Qt.PointingHandCursor)
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self.on_stop)
         ops.addWidget(self.btn_start, 3)
         ops.addWidget(self.btn_stop, 1)
-        root.addLayout(ops)
+        fl.addLayout(ops)
 
-        # 6) 进度
+        # 进度（留在项目页，不切页也能看到）
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
         self.bar.setValue(0)
-        self.bar.setTextVisible(True)
-        self.bar.setFormat("%p%")
-        self.bar.setFixedHeight(16)
-        root.addWidget(self.bar)
+        # 文字不画在条上：QSS 的 chunk 会盖住 text-align:center 的字，
+        # 深色块配深色字几乎不可读。改在条下面单独一行。
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(8)
+        fl.addWidget(self.bar)
 
-        # 7) 日志
+        self.bar_text = QLabel("尚未开始")
+        self.bar_text.setStyleSheet(
+            f"color:{ui_theme.TEXT_MUTE}; font-size:11.5px;")
+        fl.addWidget(self.bar_text)
+
+        self._page_outer.addWidget(footer)
+
+    # ---------------------------------------------------------- 页 2：运行
+    def _build_page_run(self):
+        page, root = self._new_page(
+            "运行", "翻译过程中的实时进度。切到别的页不影响任务继续跑。")
+
+        # 顶部：进度环 + 四个统计
+        top = QHBoxLayout()
+        top.setSpacing(14)
+
+        ring_card = Card("任务进度")
+        self.ring = ProgressRing()
+        ring_card.body.addWidget(self.ring, 0, Qt.AlignHCenter)
+        ring_card.setFixedWidth(220)
+        top.addWidget(ring_card)
+
+        stats = QGridLayout()
+        stats.setHorizontalSpacing(14)
+        stats.setVerticalSpacing(14)
+        self.stat_done = StatCard("已完成", "句", "check")
+        self.stat_remain = StatCard("剩余", "句", "clock")
+        self.stat_speed = StatCard("速度", "句 / 秒", "speed")
+        self.stat_stage = StatCard("当前阶段", "", "bolt", big=False)
+        stats.addWidget(self.stat_done, 0, 0)
+        stats.addWidget(self.stat_remain, 0, 1)
+        stats.addWidget(self.stat_speed, 1, 0)
+        stats.addWidget(self.stat_stage, 1, 1)
+        top.addLayout(stats, 1)
+        root.addLayout(top)
+
+        # 日志
+        c = Card("运行日志", "翻译失败的句子、被拒的批次、写回结果都在这里。",
+                 "log")
         self.log_view = QPlainTextEdit()
         self.log_view.setObjectName("log")
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
-        root.addWidget(self.log_view, 1)
+        self.log_view.setMinimumHeight(240)
+        c.body.addWidget(self.log_view, 1)
+        root.addWidget(c, 1)
+
+    # ---------------------------------------------------------- 页 3：设置
+    def _build_page_settings(self):
+        page, root = self._new_page("设置", "只影响本机，不写进游戏目录。")
+
+        c1 = Card("术语表", "人名、地名、招式名的固定译法。翻译时以占位符形式保护，"
+                          "模型改不动。", "book")
+        self.glossary_btn = QPushButton(f"编辑术语表 · {len(self.glossary)} 条")
+        self.glossary_btn.setToolTip("手动编辑术语表（原文 = 译文，一行一条）")
+        self.glossary_btn.clicked.connect(self.on_glossary)
+        c1.body.addWidget(self.glossary_btn)
+        root.addWidget(c1)
+
+        c2 = Card("关于", "", "doc")
+        about = QLabel(
+            "galgame-tl · galgame 汉化工具\n\n"
+            "支持引擎：Ren'Py · RPG Maker MV/MZ · VX Ace · Unity\n"
+            "翻译链路：主模型 → NVIDIA 兜底 → 谷歌翻译兜底\n\n"
+            "缓存与快照都写在游戏目录旁的 _galgame_tl/，删掉它等于清空进度。")
+        about.setWordWrap(True)
+        about.setStyleSheet(f"color:{ui_theme.TEXT_DIM}; font-size:12.5px;")
+        c2.body.addWidget(about)
+        root.addWidget(c2)
+
+        root.addStretch(1)
 
     # ---------------------------------------------------------- 术语表
     GLOSSARY_PATH = Path(__file__).resolve().parent / "glossary.json"
@@ -690,7 +818,7 @@ class MainWindow(QMainWindow):
                 g[k.strip()] = v.strip()
         self.glossary = g
         self._save_glossary_file()
-        self.glossary_btn.setText(f"术语表（{len(g)} 条）")
+        self.glossary_btn.setText(f"编辑术语表 · {len(g)} 条")
         self.log(f"[术语] {len(g)} 条（已保存到 glossary.json）")
 
     def on_auto_glossary(self):
@@ -762,7 +890,7 @@ class MainWindow(QMainWindow):
             return
         self.glossary.update(picked)
         self._save_glossary_file()
-        self.glossary_btn.setText(f"术语表（{len(self.glossary)} 条）")
+        self.glossary_btn.setText(f"编辑术语表 · {len(self.glossary)} 条")
         self.log(f"[术语] 新增 {len(picked)} 条，共 {len(self.glossary)} 条（已保存）")
 
     def _on_pipeline_emit(self, kind, payload):
@@ -873,6 +1001,13 @@ class MainWindow(QMainWindow):
 
         self.log_view.clear()
         self.bar.setValue(0)
+        self.bar_text.setText("准备中…")
+        self._t0 = 0.0
+        self.stat_done.set_value("0")
+        self.stat_remain.set_value("0")
+        self.stat_speed.set_value("0.0")
+        self.ring.set_value(0.0, "启动中")
+        self.nav.select(1)
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
 
@@ -893,21 +1028,44 @@ class MainWindow(QMainWindow):
             self.worker.stop()
             self.btn_stop.setEnabled(False)
 
+    STAGE_LABEL = {
+        "detect": "识别引擎", "prepare": "准备（解包/反编译）",
+        "extract": "提取文本", "glossary": "生成术语表", "translate": "翻译",
+        "apply": "写回游戏", "finalize": "字体与收尾", "done": "完成",
+    }
+
     def on_stage(self, name: str, pct: float):
         self.bar.setValue(int(max(0.0, min(1.0, pct)) * 1000))
-        label = {"detect": "识别引擎", "prepare": "准备（解包/反编译）",
-                 "extract": "提取文本", "glossary": "生成术语表", "translate": "翻译",
-                 "apply": "写回游戏", "finalize": "字体与收尾",
-                 "done": "完成"}.get(name, name)
+        label = self.STAGE_LABEL.get(name, name)
+        self._stage_name = label
         self.setWindowTitle(f"galgame-tl · {label}")
+        self.stat_stage.set_value(label)
+        self.ring.set_value(max(0.0, min(1.0, pct)), label)
+        # 速度只在翻译阶段有意义：done 计的是「翻了多少句」，
+        # 从识别阶段开始计时会把前面解包/提取的几十秒算进去，速度偏低。
+        import time
+        if name == "translate":
+            if not self._t0:
+                self._t0 = time.monotonic()
+        else:
+            self._t0 = 0.0
 
     def on_progress(self, done: int, total: int):
         # 注意 %v 是进度条的原始值（这里是 0~1000），不是百分比 ——
         # 直接拼 %v 会显示成 "470%"。百分比要自己算。
         frac = done / max(1, total)
         if total:
-            self.bar.setFormat(f"翻译 {frac*100:.0f}%  ({done}/{total})")
+            self.bar_text.setText(f"翻译 {frac*100:.0f}%　·　{done:,} / {total:,} 句")
         self.bar.setValue(int(1000 * 0.25 + 600 * frac))
+
+        # 运行页统计
+        self.stat_done.set_value(f"{done:,}")
+        self.stat_remain.set_value(f"{max(0, total - done):,}")
+        self.ring.set_value(0.25 + 0.6 * frac, "翻译中")
+        import time
+        if self._t0 and done > 0:
+            elapsed = max(1e-6, time.monotonic() - self._t0)
+            self.stat_speed.set_value(f"{done / elapsed:.1f}")
 
     def on_done(self, result):
         self._cleanup_thread()
@@ -915,13 +1073,18 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(False)
         self.setWindowTitle("galgame-tl · galgame 汉化工具")
         self.bar.setValue(1000)
-        self.bar.setFormat("完成" if result.ok else "失败")
+        self.bar_text.setText("完成" if result.ok else "失败")
+        self.ring.set_value(1.0 if result.ok else 0.0,
+                            "完成" if result.ok else "失败")
+        self.stat_stage.set_value("完成" if result.ok else "失败")
+        self._t0 = 0.0
         self.log("=" * 50)
         self.log(result.summary())
         if result.json_path:
             self.log(f"提取结果: {result.json_path}")
         if result.ok:
             self.info.setText(self.info.text() + f"\n\n✅ 完成：{result.summary().splitlines()[0]}")
+            self._notify_ok()
         else:
             self.info.setText(self.info.text() + f"\n\n❌ {result.error}")
 
@@ -929,7 +1092,14 @@ class MainWindow(QMainWindow):
         self._cleanup_thread()
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
+        self.ring.set_value(0.0, "失败")
+        self.stat_stage.set_value("失败")
+        self._t0 = 0.0
         self.log("[崩溃] " + msg)
+
+    def _notify_ok(self):
+        """跑完自动切到运行页看总结，省得主人自己点。"""
+        self.nav.select(1)
 
     def _cleanup_thread(self):
         if self.thread:
