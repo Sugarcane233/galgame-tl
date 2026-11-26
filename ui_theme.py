@@ -101,15 +101,19 @@ CHECK_ICON = _icon_url("check")
 QSS = f"""
 /* ============================== 基础 ============================== */
 QWidget {{
-    background: transparent;
     color: {TEXT};
     font-family: "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei",
                  "PingFang SC", "WenQuanYi Micro Hei", sans-serif;
     font-size: 13px;
 }}
 
-QMainWindow, QDialog, QStackedWidget {{
+QMainWindow, QDialog, QStackedWidget, QWidget#pageRoot {{
     background: {BG};
+}}
+
+QWidget#pageFooter {{
+    background: {CARD};
+    border-top: 1px solid {BORDER};
 }}
 
 QWidget#pageRoot {{
@@ -281,20 +285,36 @@ QComboBox::down-arrow {{
     margin-right: 9px;
 }}
 
+/* 弹出列表是独立的 top-level 窗口，QSS 必须显式给 background-color：
+   只写 background 会被继承成透明，露出黑色窗口底 —— 实测就是一整片黑。
+   padding 也别留，那块不画 item，会露出边框色。 */
+QComboBox {{
+    combobox-popup: 0;
+}}
+
 QComboBox QAbstractItemView {{
-    background: #ffffff;
+    background-color: #ffffff;
     border: 1px solid {BORDER_HI};
-    border-radius: 8px;
-    padding: 4px;
-    outline: none;
+    border-radius: 6px;
+    padding: 0px;
+    margin: 0px;
+    outline: 0;
+    color: {TEXT};
     selection-background-color: {ACCENT_SOFT};
     selection-color: {ACCENT};
 }}
 
 QComboBox QAbstractItemView::item {{
-    padding: 6px 8px;
-    border-radius: 6px;
-    min-height: 20px;
+    padding: 7px 10px;
+    min-height: 22px;
+    border: none;
+    background-color: transparent;
+    color: {TEXT};
+}}
+
+QComboBox QAbstractItemView::item:selected {{
+    background-color: {ACCENT_SOFT};
+    color: {ACCENT};
 }}
 
 QComboBox QAbstractItemView::item:hover {{
@@ -440,11 +460,6 @@ QPushButton#ghost:hover {{
     background: {CARD_ALT};
     color: {TEXT};
     border-color: {BORDER_HI};
-}}
-
-QWidget#pageFooter {{
-    background: {CARD};
-    border-top: 1px solid {BORDER};
 }}
 
 /* ============================== 拖放区 ============================== */

@@ -112,6 +112,32 @@ class Worker(QObject):
 
 
 # --------------------------------------------------------------- 拖放区域
+class SkinComboBox(QComboBox):
+    """自带白底弹出层的下拉框。
+
+    为什么需要子类：popup 是独立 top-level 窗口，Qt 用
+    QComboBoxPrivateContainer(QFrame) 包住 QListView。QSS 的
+    `QComboBox QAbstractItemView` 只选得到里面的 view，外层容器仍然透明，
+    透明 top-level 会露出宿主窗口的黑色底 —— 视觉上就是列表上下两条黑边
+    （截图确认过）。容器没有稳定的 objectName 可选，只能在 showPopup 后
+    直接给窗口设样式。
+    """
+
+    def showPopup(self):
+        super().showPopup()
+        view = self.view()
+        popup = view.window() if view else None
+        if popup is None or popup is self:
+            return
+        popup.setAttribute(Qt.WA_StyledBackground, True)
+        popup.setStyleSheet(
+            "QFrame { background-color: #ffffff; border: 1px solid #d3d7de;"
+            " border-radius: 6px; }"
+            " QListView { background-color: #ffffff; border: none;"
+            " outline: 0; padding: 2px; }"
+        )
+
+
 class DropZone(QFrame):
     dropped = Signal(str)
 
@@ -187,6 +213,9 @@ class MainWindow(QMainWindow):
         self.current_target = ""
         self.detection = None
         self.glossary: dict[str, str] = self._load_glossary_file()
+        # 下拉里的模型来自哪个来源：workbuddy / custom。
+        # 切到自定义端点时靠它判断要不要清空旧列表。
+        self._models_owner = "workbuddy"
 
         # 运行页的实时统计（on_progress 里更新）
         self._t0 = 0.0
@@ -330,7 +359,7 @@ class MainWindow(QMainWindow):
         ml.setColumnStretch(3, 1)
 
         ml.addWidget(self._field_label("来源"), 0, 0)
-        self.source_combo = QComboBox()
+        self.source_combo = SkinComboBox()
         self.source_combo.addItems([
             "WorkBuddy（直连，免 token）",
             "WorkBuddy（本机网关，需 token）",
@@ -345,8 +374,10 @@ class MainWindow(QMainWindow):
         ml.addWidget(self.base_edit, 1, 1, 1, 3)
 
         ml.addWidget(self._field_label("模型"), 2, 0)
-        self.model_combo = QComboBox()
+        self.model_combo = SkinComboBox()
         self.model_combo.setEditable(True)
+        # 上游有 63 个模型，不限制的话弹出列表会拉到屏幕外
+        self.model_combo.setMaxVisibleItems(12)
         self.model_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         ml.addWidget(self.model_combo, 2, 1)
 
@@ -641,6 +672,10 @@ class MainWindow(QMainWindow):
             self.on_probe()
         else:
             self.log("[探测] 没找到 WorkBuddy 网关（插件可能没启用），请手动填 Base URL")
+        # 网关要 token 才给模型列表，填不上时下拉就空着，看着像坏了。
+        # 上游是同一批 WorkBuddy 账号，模型名完全通用，所以直接借直连的目录填上。
+        if self.model_combo.count() == 0:
+            self._fill_models_from_vault("网关需要 token，模型列表先借用直连账号的目录")
 
     def _on_source_changed(self, idx: int):
         if idx == 0:
@@ -662,6 +697,51 @@ class MainWindow(QMainWindow):
             self.key_edit.setPlaceholderText("sk-…（本地端点可留空）")
             if not self.base_edit.text() or self.base_edit.text().startswith("workbuddy:"):
                 self.base_edit.setText("http://127.0.0.1:11434/v1")
+            # 上一批是 WorkBuddy 的模型名，留着会让人以为这个端点也支持，
+            # 实际请求会 404。清空后提示重新探测。
+            if self._models_owner != "custom":
+                self.model_combo.clear()
+                self.model_combo.setCurrentText("")
+                self._models_owner = "custom"
+
+    def _fill_models_from_vault(self, why: str = ""):
+        """用 DSH vault 里的 WorkBuddy 账号拉模型目录填进下拉。
+
+        网关模式拿不到 token 时也走这条路：上游是同一批账号，模型名通用，
+        至少让下拉不是空的。失败就静默返回，不打扰用户。
+        """
+        try:
+            from core import wbdirect
+            accs = wbdirect.discover_accounts()
+            if not accs:
+                return False
+            models = wbdirect.list_models(accs[0])
+        except Exception as e:
+            self.log(f"[模型] 借直连目录失败: {e}")
+            return False
+        if not models:
+            return False
+        if why:
+            self.log(f"[模型] {why}")
+        self._apply_models(models)
+        return True
+
+    def _apply_models(self, models: list[str], owner: str = "workbuddy"):
+        """统一填模型下拉 + 挑默认值。两条路径（直连 / 网关）共用。"""
+        self._models_owner = owner
+        cur = self.model_combo.currentText().strip()
+        self.model_combo.clear()
+        self.model_combo.addItems(models)
+        if cur and cur in models:
+            self.model_combo.setCurrentText(cur)
+            return
+        # deepseek-v4.1-flash 实测 1.6 秒/4 句；hy4free 免费但极慢（4 句 79 秒）
+        for pref in ("deepseek-v4.1-flash", "deepseek-v4-flash",
+                     "fast-model", "hy4std", "auto"):
+            if pref in models:
+                self.model_combo.setCurrentText(pref)
+                return
+        self.model_combo.setCurrentIndex(0)
 
     def _load_wb_accounts(self):
         """直连模式：把 vault 里的账号和上游模型读出来填进下拉。"""
@@ -685,19 +765,11 @@ class MainWindow(QMainWindow):
             models = wbdirect.list_models(acc)
         except Exception as e:
             self.log(f"[WorkBuddy] 读模型目录失败: {e}")
-        self.model_combo.clear()
         if models:
-            self.model_combo.addItems(models)
-            # 默认挑一个便宜的通用模型
-            # hy4free 免费但实测极慢（4 句 79 秒，还会解析失败），
-            # deepseek-v4.1-flash 是实测 1.6 秒/4 句的档位
-            for pref in ("deepseek-v4.1-flash", "deepseek-v4-flash",
-                         "fast-model", "hy4std", "auto"):
-                if pref in models:
-                    self.model_combo.setCurrentText(pref)
-                    break
+            self._apply_models(models)
             self.log(f"[WorkBuddy] 上游提供 {len(models)} 个模型")
         else:
+            self.model_combo.clear()
             self.log("[WorkBuddy] 没读到模型目录，可以手填 hy4free / hy4std")
 
     def on_probe(self):
@@ -712,6 +784,7 @@ class MainWindow(QMainWindow):
         models = be.list_models()
         self.model_combo.clear()
         if models:
+            self._models_owner = "custom"
             self.model_combo.addItems(models)
             self.log(f"[探测] {base} 提供 {len(models)} 个模型: "
                      + ", ".join(models[:8]) + ("…" if len(models) > 8 else ""))
