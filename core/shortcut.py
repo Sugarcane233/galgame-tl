@@ -148,6 +148,14 @@ def _pick_launch(root: Path, det) -> Optional[Path]:
     if not cands:
         return None
 
+    # 装了 BepInEx（Unity 运行时汉化）就必须走 run_bepinex.sh，直接开游戏本体
+    # 会绕过 doorstop，词表根本不加载 —— 玩家看到的是英文，还以为汉化没生效。
+    if (root / "BepInEx" / "core" / "BepInEx.Preloader.dll").is_file():
+        runner = root / "run_bepinex.sh"
+        if runner.is_file():
+            runner.chmod(0o755)
+            return runner
+
     def score(p: Path) -> tuple:
         ex = os.access(p, os.X_OK)
         n = p.name.lower()
