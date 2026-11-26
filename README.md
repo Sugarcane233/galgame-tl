@@ -189,7 +189,7 @@ update-desktop-database ~/.local/share/applications 2>/dev/null || true
 | **RPG Maker MZ** | `data/System.json` + `js/rmmz_core.js` | `data/*.json` | 同上 |
 | **RPG Maker VX Ace** | `Game.ini` + `System/RGSS3xx.dll` + `Game.rgss3a` | `Game.rgss3a` 里的 `Data/*.rvdata2` | 解 RGSSAD → 改 Ruby Marshal → 重打包 |
 | **RPG Maker VX / XP** | `Library=RGSS300/202`、`Game.rgss2a/rgssad` | 同上 | 同上（RGSSAD v1/v2 算法） |
-| **Unity** | `*_Data/Managed/Assembly-CSharp.dll`、`UnityPlayer.so`、`globalgamemanagers` | TextAsset + MonoBehaviour 裸字节 | UnityPy 抽改；IL2CPP 走 BepInEx |
+| **Unity** | `*_Data/Managed/Assembly-CSharp.dll`、`UnityPlayer.so`、`globalgamemanagers` | TextAsset + MonoBehaviour 裸字节 | UnityPy 抽改；译文变长会黑屏时改走 `--unity-runtime`（BepInEx + XUnity，资源零改动）；IL2CPP 只能走后者 |
 
 **其它引擎**会给出线索不报错，比如：
 
@@ -1109,6 +1109,94 @@ if len(raw) < orig_len:                       # orig_len 是进函数时的原�
 
 **IL2CPP 游戏**静态改不了，检测到会提示走 BepInEx + XUnity 运行时路线。
 
+### Unity 运行时汉化（`--unity-runtime`）
+
+**什么时候必须用**：译文比原文长很多的时候。
+
+MonoBehaviour 没有 TypeTree，对象长度由 `Assembly-CSharp.dll` 里的类布局固定。
+字符串改长，Unity 启动时会报
+
+```
+A scripted object (probably Fungus.LoadScene?) has a different serialization
+layout when loading. (Read 84 bytes but expected 86 bytes)
+```
+
+并**丢弃整个对象** → 场景加载失败 → **闪过 logo 后黑屏**。
+
+实测 Together Again（1.2G / Unity 2018.4.22f1 / Fungus）：全量回填后 1869 个
+对象变长，其中 **1937 个字段后面还有数据**，硬改必崩。硬凑成等长又得截断
+950/2325 条译文（中位超 8 字节，最长超 155 字节），台词尾巴全丢。
+
+所以另开一条通路：**一个字节都不碰资源文件**，让 XUnity 在游戏进程内钩住
+`UnityEngine.UI.Text.set_text` / `TMPro.TMP_Text.SetText`，用离线词表替换。
+
+```bash
+./gtl run <游戏目录> --unity-runtime --unity-verify
+```
+
+`core/unity_runtime.py` 做四件事：
+
+1. **装 BepInEx 5.4.23.3（linux x64 包）+ XUnity.AutoTranslator 5.6.3.1**，
+   并把 `run_bepinex.sh` 的 `executable_name` 指向游戏本体；
+2. **写 `AutoTranslatorConfig.ini`**：`Endpoint=` 留空 = 纯离线，不连网；
+   `MaxCharactersPerTranslation` 从默认 200 调到 2500（超长台词否则根本不翻）；
+3. **生成三份词表**（见下）；
+4. **挂 TMP 中文字体**（见下）。
+
+#### 五个坑
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 打字机逐字显示时是英文 | SayDialog 把说话人名和台词分给**两个** Text 组件，词典里只有 `You:'What?'`，匹配不到单独的 `'What?'` | 拆行后再剥掉行首 `Name:` 前缀，存第三份词表 |
+| 满屏方框 | 文本换成中文了，但 TMP 字体只有拉丁字形 | 装 `TMP_Font_AssetBundles.zip` 的 `arialuni_sdf_u2018`，配 `OverrideFontTextMeshPro` |
+| 流水线卡在「找不到 ini」 | `AutoTranslatorConfig.ini` 是 XUnity 首次启动才生成的 | 自己按模板写一份，不等游戏先跑 |
+| BepInEx 把字体包当游戏跑 | 按文件大小挑主程序，29MB 字体包胜出 | `_executable()` 排除 `arialuni_sdf_*` |
+| 快捷方式打开还是英文 | 直接开游戏本体绕过了 doorstop | 装了 BepInEx 就指向 `run_bepinex.sh`，`Path=` 设在游戏目录 |
+
+#### 三份词表为什么是三份
+
+Unity 里一个 Text 组件的字符串可能是整块 `Her:'...'\n\nYou:'...'`，也可能被
+游戏拆成单行分别塞进不同组件。全交给 XUnity 去猜不可靠，所以：
+
+- `galgame-tl-full.txt` —— 整条匹配（2203 条）
+- `galgame-tl-lines.txt` —— 按行拆开（4629 条）
+- `galgame-tl-nospeaker.txt` —— **去掉说话人前缀**（1759 条）
+
+加载顺序按文件名字母序，`nospeaker` 最后加载、优先级最高。前缀判据必须是
+「冒号后紧跟非空白」，否则 `Day: {$day}`、`Slot 2: Cheat to rank 3` 这类
+UI 标签会被当成说话人剥掉。
+
+配合 `GeneratePartialTranslations=True`（XUnity 为每条的所有前缀预生成译文），
+实测 partial translations 从 282982 涨到 **333860** 条——逐字显示时也是中文。
+
+#### 中文字体
+
+TMP 游戏的默认字体没有汉字，换完文本满屏方框。方框其实是**好消息**：说明
+文本已经成功换成中文了。
+
+```python
+# 判断要不要装字体包：看 dll 有没有引用 TMP 命名空间
+b"TMPro" in (root / "*_Data/Managed/Assembly-CSharp.dll").read_bytes()
+```
+
+- TMP 游戏：`OverrideFontTextMeshPro=arialuni_sdf_u2018`（asset bundle 名）
+- 纯 UGUI 游戏：`OverrideFont=<系统字体族名>`，如 `Noto Sans CJK SC`
+
+u2018 包里的 asset 版本是 1.0.x、u2019 是 1.1.0。游戏 TMP 1.4.0 能加载，
+会打一条 `TextMesh Pro version mismatch` 警告，但字形正常。
+
+#### 验证口径
+
+```bash
+grep -c "serialization layout" <日志>   # 必须 0
+grep -c "corrupted" <日志>              # 必须 0
+grep "Setting text on" <日志>           # 应有中文
+grep "Partial translations generated" <日志>
+```
+
+实测结果：layout 警告 **0 条**、corrupted **0 条**、136 个资源文件与 `.orig`
+逐字节一致、主菜单 NSFW 免责声明成功替换成中文。
+
 ---
 
 ## Windows 游戏
@@ -1467,7 +1555,10 @@ galgame-tl/
 | 重复运行出现「【译】早安」 | 旧版本的问题 | 已修：从 `_bak_data` 读原文 |
 | VX Ace 改完还是英文 | 只改了 `Data/` 没重打包 `Game.rgss3a` | 已在 `apply` 里自动重打包 |
 | rpyc 反编译失败 | 脚本混淆 | `--try-harder` 已开；极端混淆需手动处理 |
-| Unity 改完没生效 | 文本在 MonoBehaviour | 走 BepInEx 路线 |
+| Unity 改完没生效 | 文本在 MonoBehaviour 裸字节里 | `--unity-runtime`（BepInEx） |
+| Unity 闪过 logo 后黑屏 | 对象长度被 dll 布局锁死，改长就丢弃 | 同上，别再硬改资源 |
+| Unity 满屏方框 | 文本已换成中文，但 TMP 字体没有汉字 | 装 `arialuni_sdf_u2018` 字体包 |
+| Unity 打字机中间态是英文 | 说话人名和台词是两个 Text 组件 | 用去掉说话人前缀的词表 |
 | WorkBuddy 网关连不上 | 那把 Bearer 是进程内随机的 | 改用「直连，免 token」 |
 | 游戏打开很卡 | 缺 libGLU，退回软件渲染 | 见[运行环境修复](#运行环境修复) |
 | 游戏打不开，`wayland not available` | Ren'Py 7.3.x 不支持 Wayland | 强制 X11，见[运行环境修复](#运行环境修复) |
