@@ -1060,9 +1060,45 @@ for obj in env.objects:
   `p.write_bytes(env.file.save())`。
 - `obj.set_raw_data(newraw)` 之后要重新 `env.file.save()` 整个文件。
 
-实测结果（1.2G / Unity 2018.4.22f1 / Fungus）：提取 2938 条，全部回填，
-按 `(path_id, 字段序号)` 严格配对复检 **2790/2790 零误差**，重载后
-497 个对象全部可正常解析。
+#### 回填变短必须补齐（不补，游戏直接进不去）
+
+这条是最严重的：**缩短字符串会让游戏判定文件损坏**。
+
+```
+$ ./Together\ Again.x86_64 -batchmode -quit
+The file '.../level0' is corrupted! Remove it and launch unity again!
+[Position out of bounds!]
+```
+
+而同一份文件换成一字未改的原始版本，启动零报错。
+
+隔离过程（每一步都在真实游戏里启动验证）：
+
+| 改法 | 结果 |
+|---|---|
+| 纯 `load()` + `save()`，不改内容 | 正常 |
+| 单字段 10 → 12 字节（变长） | 正常 |
+| 单字段缩短 2 字节（187 → 185） | 正常 |
+| 单字段缩短 17 字节（187 → 170） | **Position out of bounds** |
+
+触发条件是**对象整体变短**。根因：UnityPy 的 `SerializedFile.save()` 按对象
+重排数据区、把每个对象的长度写进对象表，它自己重载没问题；但 Unity 运行时
+还额外用打包时的对象范围做边界校验，变短会让后面对象的落点整体前移、越过
+文件尾。
+
+修法（`core/unity_mb.py` 的 `patch()` 末尾）：
+
+```python
+if len(raw) < orig_len:                       # orig_len 是进函数时的原始长度
+    raw = raw + b"\x00" * (orig_len - len(raw))
+```
+
+补 0 是安全的——多出来的字节落在字符串数据之后，Unity 按长度前缀取值，
+读不到它们。**只补缩短，不补变长**（变长实测不报错，补齐反而会破坏后续字段偏移）。
+
+实测结果（1.2G / Unity 2018.4.22f1 / Fungus）：提取 2938 条、回填 2770 处，
+游戏 `-batchmode` 启动零报错，69 个 level 文件全部可重载，
+2454 个文本字段 / 2368 条含中文，严格配对复检零误差。
 
 **TextAsset 的行级过滤**：TextAsset 里常有 atlas 元数据、Lua 脚本、类型清单，
 逐行收会把 `format: RGBA8888`、`"Fungus.Block",` 当台词。两道闸：
