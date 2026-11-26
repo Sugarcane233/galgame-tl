@@ -206,6 +206,7 @@ def patch(raw: bytes, edits: list[tuple[int, int, str, str]]) -> tuple[bytes, in
     校验不通过的条目跳过（文件被改过 / 提取后内容变了），
     不抛异常：一句没翻上比写坏文件好。
     """
+    orig_len = len(raw)
     ok = 0
     for offset, length, old, new in sorted(edits, key=lambda e: e[0], reverse=True):
         if offset < 0 or offset + 4 + length > len(raw):
@@ -218,4 +219,22 @@ def patch(raw: bytes, edits: list[tuple[int, int, str, str]]) -> tuple[bytes, in
         nb = new.encode("utf-8")
         raw = raw[:offset] + struct.pack("<i", len(nb)) + nb + raw[offset + 4 + length:]
         ok += 1
+    if not ok:
+        return raw, 0
+    # 缩短之后必须把对象补齐回原长度，否则游戏直接判定文件损坏。
+    #
+    # 实测（Together Again level0 / pid=40，一条 187 字节的免责声明缩到
+    # 170 字节）：Unity 启动报
+    #   `The file '.../level0' is corrupted! [Position out of bounds!]`
+    # 把同一份字节原样补 0 回 316 字节（对象原长）之后，游戏正常加载。
+    #
+    # 原因：UnityPy 的 SerializedFile.save() 会按对象重排数据区，把每个
+    # 对象的长度写进对象表；但 Unity 运行时还会用**打包时的原始对齐**校验
+    # 对象范围。变长（尤其变短）会让后续对象的落点整体前移，越过文件尾。
+    # 变长（170→187 那种 +1 字节）实测不报错，但缩短一律炸——所以统一补齐。
+    #
+    # 补 0 是安全的：多出来的尾部字节落在字符串数据之后，Unity 读字段时
+    # 按长度前缀取值，不会读到它们。
+    if len(raw) < orig_len:
+        raw = raw + b"\x00" * (orig_len - len(raw))
     return raw, ok
