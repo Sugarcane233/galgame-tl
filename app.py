@@ -487,20 +487,11 @@ class MainWindow(QMainWindow):
         self.shortcut_check = QCheckBox("完成后创建启动快捷方式")
         self.shortcut_check.setChecked(True)
         self.shortcut_check.setToolTip(
-            "汉化完成后在应用列表里加一个游戏启动项，图标用游戏自带的\n"
+            "汉化完成后在应用抽屉（开始菜单）里加一个游戏启动项，图标用游戏自带的\n"
             "（Ren'Py 的 window_icon.png / MZ 的 icon/icon.png）；\n"
             "找不到原图才退回按名字生成的字母图标——不会换成工具自己的图标。\n"
-            "同时会往桌面目录放一份（GNOME 需要 trusted 标记才显示成图标）。")
-        oc.addWidget(self.shortcut_check, 3, 0)
-
-        self.shortcut_desktop_check = QCheckBox("桌面上也放一份")
-        self.shortcut_desktop_check.setChecked(True)
-        self.shortcut_desktop_check.setToolTip(
-            "取消勾选就只加到应用列表（开始菜单），不放桌面。")
-        oc.addWidget(self.shortcut_desktop_check, 3, 1)
-        # 主开关关掉时，「桌面上也放一份」跟着变灰（连接放在控件建好之后，
-        # 否则 lambda 里引用的属性还不存在）
-        self.shortcut_check.toggled.connect(self.shortcut_desktop_check.setEnabled)
+            "只在应用抽屉里加，不往桌面放东西。")
+        oc.addWidget(self.shortcut_check, 3, 0, 1, 2)
 
         self.unity_rt_check = QCheckBox("Unity 运行时替换（不动资源文件）")
         self.unity_rt_check.setToolTip(
@@ -1149,7 +1140,6 @@ class MainWindow(QMainWindow):
             gf_fallback=self.gf_check.isChecked(),
             simplify=self.simp_check.isChecked(),
             make_shortcut=self.shortcut_check.isChecked(),
-            shortcut_on_desktop=self.shortcut_desktop_check.isChecked(),
             unity_runtime=self.unity_rt_check.isChecked(),
             # GUI 里不开自检：自检要占住一个游戏窗口 45 秒，从界面跑很怪。
             # 要查问题用 CLI 的 --unity-verify。

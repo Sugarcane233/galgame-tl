@@ -105,8 +105,9 @@ class PipelineOptions:
     # 图标一律用游戏自带的（Ren'Py 的 window_icon.png / MZ 的 icon/icon.png），
     # 找不到才退回按名字生成的字母图标。
     make_shortcut: bool = True
-    # 顺便往桌面目录也放一份（GNOME 需要 trusted 标记才会显示成图标）
-    shortcut_on_desktop: bool = True
+    # 往桌面目录也放一份。**默认关**：桌面副本与应用列表那份互不联动，
+    # 删了一边另一边成孤儿；要桌面图标从应用抽屉拖更干净。
+    shortcut_on_desktop: bool = False
     # 快捷方式的显示名；留空 = 自动取（package.json 的 window.title 或目录名）
     shortcut_title: str = ""
 
@@ -508,9 +509,18 @@ class Pipeline:
         """
         from . import shortcut as sc
 
+        root = Path(self.det.root) if self.det else Path(self.opts.target)
+        # 旧版本默认往桌面也写一份，升级后那些副本成了孤儿（删应用列表里
+        # 那个它们不会跟着消失）。除非这次明确要桌面副本，否则先清掉。
+        if not self.opts.shortcut_on_desktop:
+            try:
+                sc.remove_desktop_copies(root, self.opts.shortcut_title, self.log)
+            except Exception as e:
+                self.log(f"[快捷方式] 清理桌面副本失败（忽略）: {e}")
+
         try:
             res = sc.create(
-                Path(self.det.root) if self.det else Path(self.opts.target),
+                root,
                 det=self.det,
                 title=self.opts.shortcut_title,
                 also_desktop=self.opts.shortcut_on_desktop,

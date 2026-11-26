@@ -266,6 +266,9 @@ class GameRow(QFrame):
             self.page.toast("目录不存在")
             return
         try:
+            # 顺手清掉旧版本遗留在桌面的副本：现在只往应用抽屉写，
+            # 桌面那份留着既是孤儿，也会让用户误以为有两条入口。
+            sc.remove_desktop_copies(self.entry.root, self.entry.title, self.page.log)
             res = sc.create(self.entry.root, title=self.entry.title,
                             log=self.page.log)
         except Exception as e:
@@ -286,6 +289,13 @@ class GameRow(QFrame):
         if not any(opts.values()):
             self.page.toast("什么都没选")
             return
+        if opts.get("desktop"):
+            for dp in lib.desktop_copies(self.entry):
+                try:
+                    dp.unlink()
+                    self.page.log(f"[删除] ✓ {dp}")
+                except Exception as e:
+                    self.page.log(f"[删除] ✗ {dp} —— {e}")
         done, errs = lib.apply_delete(dlg.plan, game=opts["game"],
                                       cache=opts["cache"],
                                       shortcut=opts["shortcut"],
@@ -331,6 +341,7 @@ class DeleteDialog(QDialog):
             bb.clicked.connect(lambda *_: self.reject())
             lay.addWidget(bb)
             self.chk_game = self.chk_cache = self.chk_short = None
+            self.chk_desk = None
             return
 
         tip = QLabel("永久删除，不进回收站。勾选的项目会立即执行。")
@@ -339,17 +350,22 @@ class DeleteDialog(QDialog):
         lay.addWidget(tip)
 
         self.chk_game = self._check(
-            lay, f"游戏本体（{lib.human_size(self.plan.game_bytes)}）",
-            self.plan.game_paths, checked=False)
+            lay, "游戏本体", self.plan.game_paths, checked=False,
+            size=self.plan.game_bytes)
         self.chk_cache = self._check(
-            lay, f"汉化缓存与快照（{lib.human_size(self.plan.cache_bytes)}）",
-            self.plan.cache_paths, checked=True)
+            lay, "汉化缓存与快照", self.plan.cache_paths, checked=True,
+            size=self.plan.cache_bytes)
+        desk = lib.desktop_copies(entry)
         self.chk_short = self._check(
-            lay, "启动快捷方式与图标", self.plan.shortcut_paths, checked=True)
+            lay, "应用抽屉里的启动入口与图标", self.plan.shortcut_paths,
+            checked=True)
+        self.chk_desk = self._check(
+            lay, "桌面上的旧副本", [str(p) for p in desk], checked=True)
 
         for chk, paths in ((self.chk_game, self.plan.game_paths),
                            (self.chk_cache, self.plan.cache_paths),
-                           (self.chk_short, self.plan.shortcut_paths)):
+                           (self.chk_short, self.plan.shortcut_paths),
+                           (self.chk_desk, [str(p) for p in desk])):
             if not paths:
                 chk.setEnabled(False)
                 chk.setText(chk.text() + "（没有）")
@@ -365,7 +381,14 @@ class DeleteDialog(QDialog):
         lay.addWidget(bb)
 
     def _check(self, lay: QVBoxLayout, label: str, paths: list[str],
-               checked: bool) -> QCheckBox:
+               checked: bool, size: int = -1) -> QCheckBox:
+        """一个可勾选项 + 它涉及的路径清单。
+
+        `size` 只在确实有路径时才拼进标签 —— 否则会出现
+        「汉化缓存与快照（0 B） （没有）」这种又长又矛盾的写法。
+        """
+        if paths and size >= 0:
+            label = f"{label}（{lib.human_size(size)}）"
         box = QFrame()
         box.setObjectName("delItem")
         v = QVBoxLayout(box)
@@ -390,6 +413,7 @@ class DeleteDialog(QDialog):
             "game": bool(self.chk_game and self.chk_game.isChecked()),
             "cache": bool(self.chk_cache and self.chk_cache.isChecked()),
             "shortcut": bool(self.chk_short and self.chk_short.isChecked()),
+            "desktop": bool(getattr(self, "chk_desk", None) and self.chk_desk.isChecked()),
         }
 
 

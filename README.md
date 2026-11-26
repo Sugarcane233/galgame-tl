@@ -83,7 +83,7 @@ python3 -m venv .venv
 ./galgame-tl.sh
 ```
 
-### 装桌面图标（可选）
+### 装进应用列表（可选）
 
 ```bash
 cat > ~/.local/share/applications/galgame-tl.desktop <<EOF
@@ -115,9 +115,16 @@ update-desktop-database ~/.local/share/applications 2>/dev/null || true
 汉化收尾时会自动给游戏建一个启动快捷方式（默认开，界面上可关）：
 
 ```
-~/.local/share/applications/<游戏名>-<hash>.desktop   应用列表里可见
-~/桌面/<同样的文件名>.desktop                          桌面（可关）
+~/.local/share/applications/<游戏名>-<hash>.desktop   应用抽屉 / 开始菜单
 ```
+
+**只写应用抽屉，不往桌面放东西。** 桌面副本和应用列表那份互不联动 ——
+删了应用列表里的，桌面上那个还留着，变成点不开的孤儿。真要桌面图标，
+从应用抽屉里拖出来即可。
+
+旧版本默认会往桌面也写一份，所以升级后那些副本成了孤儿 —— 每次建快捷方式、
+每次跑流水线时都会顺手清掉：按 slug 尾部的路径哈希精确匹配，不会碰
+别的图标。
 
 **图标一律用游戏自带的**，绝不换成工具自己的图标 —— 翻过十几个游戏之后
 摆一排全是同一个图标就分不清谁是谁了。
@@ -144,7 +151,7 @@ update-desktop-database ~/.local/share/applications 2>/dev/null || true
 ```bash
 ./gtl run <游戏目录> --base-url workbuddy: --model deepseek-v4.1-flash
 ./gtl run <游戏目录> --no-shortcut          # 不建快捷方式
-./gtl run <游戏目录> --no-shortcut-desktop  # 只放应用列表，不放桌面
+./gtl run <游戏目录> --shortcut-desktop   # 额外在桌面也放一份（默认不放）
 ./gtl run <游戏目录> --shortcut-title "我的游戏"   # 自定义显示名
 ```
 
@@ -201,7 +208,8 @@ update-desktop-database ~/.local/share/applications 2>/dev/null || true
 
 1. 点「删除」不会立刻动手，先弹确认框；
 2. 确认框里逐条列出**真实路径**（不是「游戏数据」这种含糊说法），
-   游戏本体 / 汉化缓存 / 快捷方式三类分开勾选，默认只勾后两类；
+   游戏本体 / 汉化缓存 / 应用抽屉入口 / 桌面旧副本 四类分开勾选，
+   默认只勾后三类（游戏本体要你自己勾）；
 3. 确认后才执行，删完顺手清掉空掉的图标目录。
 
 内置三重保护：`/`、`/home`、`/usr` 这类系统目录硬拒；路径深度小于 3 的拒绝

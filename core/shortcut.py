@@ -23,9 +23,15 @@ Unity    Linux 版的图标编译进可执行文件，静态抠不出来；
 
 .desktop 写到哪里
 -----------------
-~/.local/share/applications/<slug>.desktop  （开始菜单 / 应用列表可见）
-桌面上的 .desktop 文件（~/桌面、~/Desktop，存在哪个写哪个）是另一回事：
-GNOME 需要把它标记为 trusted 才会显示成图标，这里尽力而为，失败只记日志。
+只写 ~/.local/share/applications/<slug>.desktop（应用抽屉 / 开始菜单可见）。
+
+桌面目录（~/桌面、~/Desktop）**默认不写**。理由：桌面副本和应用列表里的
+那份互不联动 —— 删了应用列表里的，桌面上那个还留着，变成点不开的孤儿；
+而用户通常只想要应用抽屉里有个图标。真要桌面图标，从应用抽屉里拖出来
+比程序偷偷写一份干净得多。
+
+`create(..., also_desktop=True)` 仍保留桌面写入能力（给脚本用），
+`remove_desktop_copies()` 可以把旧版本留下的桌面副本清掉。
 
 幂等
 ----
@@ -398,13 +404,17 @@ def _desktop_dirs() -> list[Path]:
 
 
 def create(root: Path, det=None, title: str = "",
-           also_desktop: bool = True,
+           also_desktop: bool = False,
            log: Optional[Callable[[str], None]] = None) -> ShortcutResult:
     """给游戏建启动快捷方式。
 
     root  游戏根目录
     det   Detection 对象（拿 engine / launch 线索），可为 None
     title 显示名，空则自动取
+    also_desktop
+          是否同时往桌面目录放一份。**默认关** —— 用户要的是应用抽屉里的
+          图标，桌面上再铺一个只会多一份要清理的东西（而且两处副本不会
+          联动，删了一个另一个还留着）。真要桌面图标自己从应用抽屉拖。
     """
     log = log or (lambda *a: None)
     res = ShortcutResult()
@@ -475,3 +485,46 @@ def create(root: Path, det=None, title: str = "",
     res.ok = True
     res.messages.append(res.summary())
     return res
+
+
+# ---------------------------------------------------------------- 清理桌面残留
+
+def _desktop_copies_of(root: Path, title: str = "") -> list[Path]:
+    """桌面目录里属于这个游戏的 .desktop 副本（不删，只找）。
+
+    slug 里带路径哈希（`<目录名>-<sha1前8位>`），所以只认尾部哈希对得上
+    的文件 —— 不能按名字模糊匹配，否则会把用户的其它图标一起扫进来。
+    """
+    title = (title or "").strip() or _game_title(Path(root))
+    slug = _slug(title, str(root))
+    tail = slug.rsplit("-", 1)[-1]
+    out: list[Path] = []
+    for d in _desktop_dirs():
+        try:
+            cands = list(d.glob(f"*-{tail}.desktop")) + [d / f"{slug}.desktop"]
+        except Exception:
+            continue
+        for p in cands:
+            if p.is_file() and p not in out:
+                out.append(p)
+    return out
+
+
+def remove_desktop_copies(root: Path, title: str = "",
+                          log: Optional[Callable[[str], None]] = None) -> list[Path]:
+    """删掉这个游戏遗留在桌面目录里的 .desktop 副本。
+
+    旧版本默认会往桌面也写一份；现在默认只写应用列表，所以升级后桌面
+    上那些副本是孤儿 —— 它们不随应用列表里的删除一起消失，用户得自己
+    一份份删。这里一次性收干净。
+    """
+    log = log or (lambda *a: None)
+    removed: list[Path] = []
+    for p in _desktop_copies_of(Path(root), title):
+        try:
+            p.unlink()
+            removed.append(p)
+            log(f"[快捷方式] 清掉桌面副本 {p}")
+        except Exception as e:
+            log(f"  ! 删不掉 {p}: {e}")
+    return removed

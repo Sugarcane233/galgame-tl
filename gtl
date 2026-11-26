@@ -160,7 +160,7 @@ def cmd_run(a):
         gf_fallback=not getattr(a, "no_gf_fallback", False),
         simplify=not getattr(a, "no_simplify", False),
         make_shortcut=not getattr(a, "no_shortcut", False),
-        shortcut_on_desktop=not getattr(a, "no_shortcut_desktop", False),
+        shortcut_on_desktop=bool(getattr(a, "shortcut_desktop", False)),
         shortcut_title=getattr(a, "shortcut_title", "") or "",
         unity_runtime=getattr(a, "unity_runtime", False),
         unity_lang=getattr(a, "unity_lang", "") or "zh-CN",
@@ -233,8 +233,8 @@ def main():
                    help="关掉收尾的繁转简清洗（默认开：把译文里混入的繁体统一成简体）")
     p.add_argument("--no-shortcut", action="store_true",
                    help="不创建启动快捷方式（默认会建，图标用游戏自带的）")
-    p.add_argument("--no-shortcut-desktop", action="store_true",
-                   help="快捷方式只加到应用列表，不放桌面")
+    p.add_argument("--shortcut-desktop", action="store_true",
+                   help="同时在桌面目录也放一份快捷方式（默认只加到应用列表）")
     p.add_argument("--shortcut-title", default="",
                    help="快捷方式显示名（默认自动取游戏标题）")
     p.add_argument("--unity-runtime", action="store_true",

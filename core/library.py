@@ -557,6 +557,29 @@ def plan_delete(entry: GameEntry, log: Optional[Callable[[str], None]] = None) -
     return plan
 
 
+def desktop_copies(entry: GameEntry) -> list[Path]:
+    """这个游戏还留在桌面目录里的 .desktop 副本（旧版本遗留）。"""
+    root = entry.root
+    if not root.is_dir():
+        return []
+    try:
+        from . import shortcut as sc
+        return [p for p in sc._desktop_copies_of(root, entry.title or root.name)
+                if p.exists()]
+    except Exception:
+        return []
+
+
+def clean_desktop_copies(entry: GameEntry,
+                         log: Optional[Callable[[str], None]] = None) -> list[Path]:
+    """只清桌面副本，应用列表里那个不动。"""
+    root = entry.root
+    if not root.is_dir():
+        return []
+    from . import shortcut as sc
+    return sc.remove_desktop_copies(root, entry.title or root.name, log)
+
+
 def _safe_rm(p: Path) -> tuple[bool, str]:
     """删一个路径。删前再确认一次它不在受保护目录里。"""
     try:
