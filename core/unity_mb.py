@@ -56,8 +56,50 @@ _TECH = re.compile(
 _TYPENAME = re.compile(r"^[A-Za-z_][\w]*(\.[A-Za-z_][\w]*){1,}$")
 
 # 文件路径 / 资源名 / URL
-_PATHY = re.compile(r"[/\\]|^https?:|\.(?:dll|asset|mat|prefab|png|jpg|wav|ogg|"
-                    r"shader|cs|txt|json|xml|bytes)$", re.I)
+#
+# 判斜杠前必须先剥富文本标记：`{i}fixed{/i}`、`{color=yellow}…{/color}`、
+# `</b>` 里的 `/` 不是路径分隔符。少了这一步，一句 734 字符的整段对话
+# （十几句台词）会因为一个斜体闭合标记被整块判成「资源路径」丢掉 ——
+# 实测 Together Again 有 10 处这种，后果是玩家看到后面大段大段还是英文。
+_PATHY = re.compile(r"\.(?:dll|asset|mat|prefab|png|jpg|jpeg|gif|wav|ogg|mp3|"
+                    r"shader|cs|lua|txt|json|xml|bytes|so|exe)$", re.I)
+
+# 富文本标记：Fungus / TextMeshPro 都吃 `{i}` `{b}` `{color=..}` 这一套，
+# Unity 自带的富文本是 `<b>` `</b>`。
+_RICHTEXT = re.compile(r"\{[^{}]{0,40}\}|</?[a-zA-Z][a-zA-Z0-9]{0,12}(?:=[^<>]{0,40})?>")
+
+
+def _strip_richtext(s: str) -> str:
+    """去掉富文本标记，只留正文。判路径 / 判符号占比之前都要先过一遍。"""
+    return _RICHTEXT.sub("", s)
+
+
+def _looks_like_path(s: str) -> bool:
+    """是不是文件路径 / URL，而不是「含斜杠的台词」。
+
+    不能简单地「含 `/` 就算路径」：选项文本 `Cruel/Kind`、
+    `Easy/Medium chance` 遍地都是，一刀切会把整句丢掉。
+    真正的路径至少满足一条：
+      * 以 / 或 \\ 开头（绝对路径）、或含协议头；
+      * 以已知资源扩展名结尾；
+      * 斜杠分隔的段里有一段带扩展名（`assets/Resources/icon.png`）。
+    """
+    if "://" in s:
+        return True
+    if s.lstrip().startswith(("/", "\\")):
+        return True
+    if re.match(r"^[A-Za-z]:[\\/]", s):
+        return True
+    # 字面量转义 `\n` `\t`（Fungus 常见）不是路径
+    if "\\" in s and not re.search(r"[A-Za-z0-9_]\\[A-Za-z0-9_]", s.replace("\\n", "").replace("\\t", "")):
+        if not re.search(r"\\\\|\\[A-Za-z0-9_]+\.[A-Za-z]{2,4}\b", s):
+            return False
+    if _PATHY.search(s):
+        return True
+    for part in re.split(r"[/\\]", s):
+        if _PATHY.search(part.strip()):
+            return True
+    return False
 
 # 纯标识符：没有空格、没有标点，且是驼峰/下划线风格
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -126,7 +168,9 @@ def looks_like_text(s: str) -> bool:
         return False
     if _TECH.match(s.encode("utf-8", "ignore")):
         return False
-    if _TYPENAME.match(s) or _PATHY.search(s):
+    # 判路径前先剥富文本：`{i}fixed{/i}` 里的斜杠不是路径分隔符
+    plain = _strip_richtext(s)
+    if _TYPENAME.match(s) or _looks_like_path(plain):
         return False
     if _ONLY_PLACEHOLDER.match(s):
         return False
@@ -164,13 +208,20 @@ def looks_like_text(s: str) -> bool:
         # 「不是文本」，复检时整片扫不出来 —— 实测踩过。
         return True
 
-    letters = sum(c.isalpha() for c in s)
-    if letters / len(s) < 0.5:
+    # 符号占比：按**字母占非空白字符的比例**判。
+    # 不能直接除以 len(s)：台词里大量省略号、引号、换行 ——
+    # `'I'm a mess.....'` 字母只占 46.7%，会被 0.5 阈值挡掉（实测漏了这句）。
+    # 也不能要求「至少两个词」：`'What?'` / `'Okay.'` / `'Thanks.'` 这种
+    # 单句台词在对话里遍地都是。
+    dense = re.sub(r"\s", "", plain)
+    if not dense:
+        return False
+    letters = sum(c.isalpha() for c in dense)
+    if letters / len(dense) < 0.5:
         return False            # 符号、数字为主：数字串 / 二进制残留
-    if " " not in s and "\n" not in s:
-        return False            # 没有词间隔，不像句子
-    if len(s.split()) < 2 and "\n" not in s:
-        return False            # 单个词
+    # 至少要有一个真词（2 个以上字母，或含撇号的名字如 I'm / don't）
+    if not re.search(r"[A-Za-z]{2,}|[A-Za-z]'[A-Za-z]", plain):
+        return False
     return True
 
 
