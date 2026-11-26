@@ -151,7 +151,7 @@ update-desktop-database ~/.local/share/applications 2>/dev/null || true
 | **RPG Maker MZ** | `data/System.json` + `js/rmmz_core.js` | `data/*.json` | 同上 |
 | **RPG Maker VX Ace** | `Game.ini` + `System/RGSS3xx.dll` + `Game.rgss3a` | `Game.rgss3a` 里的 `Data/*.rvdata2` | 解 RGSSAD → 改 Ruby Marshal → 重打包 |
 | **RPG Maker VX / XP** | `Library=RGSS300/202`、`Game.rgss2a/rgssad` | 同上 | 同上（RGSSAD v1/v2 算法） |
-| **Unity** | `*_Data/Managed/Assembly-CSharp.dll`、`UnityPlayer.so`、`globalgamemanagers` | TextAsset | UnityPy 抽改，或走 BepInEx |
+| **Unity** | `*_Data/Managed/Assembly-CSharp.dll`、`UnityPlayer.so`、`globalgamemanagers` | TextAsset + MonoBehaviour 裸字节 | UnityPy 抽改；IL2CPP 走 BepInEx |
 
 **其它引擎**会给出线索不报错，比如：
 
@@ -915,11 +915,59 @@ for obj in env.objects:
 编码要挨个试：`utf-8` / `utf-16-le` / `shift_jis` / `cp932` / `euc-jp`。
 写回前备份 `.orig`，失败自动回滚。
 
-**MonoBehaviour / 代码里的字符串**：改资源没用，走 BepInEx 路线：
+**MonoBehaviour 裸字节**（对话框架把文本埋在组件字段里）：这是 Unity 视觉小说
+最常见的情况，也是唯一能静态改、又必须绕开 TypeTree 的情况。
+
+实测样本 1.2G 的 Fungus 游戏：11 个 TextAsset 全是 Lua 脚本和 atlas 元数据，
+一句台词都没有；台词全在 `level*` 场景文件的 MonoBehaviour 里，而且
+`obj.read_typetree()` 直接报 `Expected to read 104 bytes, but only read 32 bytes`
+（打包时剥掉了 TypeTree，不知道字段布局就按字段读不了）。
+
+所以走裸字节路线。Unity 序列化 string 的格式是：
 
 ```
-BepInEx/config/AutoTranslatorConfig.ini
+[int32 长度 (little-endian)][UTF-8 字节，不补 \0]
 ```
+
+在 MonoBehaviour 的裸字节里按「长度字段 + 合法 UTF-8 + 像人话」三条件扫，
+命中后整体跳过 `4 + 长度` 字节（否则会把正文里的 4 个字节当新长度）。
+每条记 `(offset, length)`，回填时按偏移原地替换，无需知道字段名。
+
+实现见 `core/unity_mb.py`（`scan()` / `patch()`）：
+
+- `scan(raw)` → `[TextField(offset, length, text)]`
+- `patch(raw, edits)`：edits 是 `(offset, 原字节长度, 原文本, 新文本)`，
+  **按 offset 降序**处理（改后面的不让前面偏移失效）；每条先校验
+  「该偏移 int32 == length」且「原内容 == 原文本.encode()」，不符就跳过。
+
+`looks_like_text()` 的判定坑（都是实测踩出来的）：
+
+| 坑 | 现象 | 正确做法 |
+|---|---|---|
+| 不排除控制字符 | 把上一字段的尾巴 `\x00\x00\x00\x00\n\x00\x00\x00endingSave` 当成一条文本 | 含 NUL 或其他控制字符（除 `\n\r\t`）一律排除 |
+| CJK 按占比判定 | 译文是「【译】Day: 0」这种中英混排，汉字占比低，复检时整片扫不出来 | **只要含 ≥1 个 CJK 字符就算文本** |
+| 不排除占位模板 | `New Text` / `Character Name` / `Story text Story text Story text` 被翻进游戏 | 用 `_PLACEHOLDERS` 集合 + `_REPEATY` 正则过滤 |
+| 把 `.orig` 当扫描目标 | 第二次跑把快照和正本各扫一遍，条目直接翻倍 | `_targets()` 里跳过 `.orig` |
+| 对译文 `.strip()` | Fungus 把换行当排版信息，`'Go back\n'` 剥掉后菜单项粘连 | 空校验用 `strip()`，写入用原值 |
+
+写回通路的坑：
+
+- `SerializedFile.save()` **只返回 bytes 不写文件**，必须
+  `p.write_bytes(env.file.save())`。
+- `obj.set_raw_data(newraw)` 之后要重新 `env.file.save()` 整个文件。
+
+实测结果（1.2G / Unity 2018.4.22f1 / Fungus）：提取 2938 条，全部回填，
+按 `(path_id, 字段序号)` 严格配对复检 **2790/2790 零误差**，重载后
+497 个对象全部可正常解析。
+
+**TextAsset 的行级过滤**：TextAsset 里常有 atlas 元数据、Lua 脚本、类型清单，
+逐行收会把 `format: RGBA8888`、`"Fungus.Block",` 当台词。两道闸：
+
+1. `_ta_line_ok()` 单行判定（配置行、资源路径、符号行、单字段名都排除）
+2. **整篇比例闸**：命中行 / 总行数 < 0.15 就整篇丢弃 —— 技术性文件里能
+   "碰巧"像台词的行很少，真剧情文件命中率都在 0.5 以上
+
+**IL2CPP 游戏**静态改不了，检测到会提示走 BepInEx + XUnity 运行时路线。
 
 ---
 
@@ -1372,8 +1420,10 @@ Ren'Py 的 tl 目录完全独立，删掉等于没动过。VX Ace 的 `Game.rgss
 
 ### 未在真实游戏上验证
 
-- Unity `patch`（缺真实 assets 样本；用的 UnityPy 1.25.4 标准 API，
-  `m_Script` 赋值 + `env.file.save()`，极端加密包可能失败，会自动回滚 `.orig`）
+- Unity `patch` 的极端情况：已在 1.2G 真实游戏（Together Again 1.0.3，
+  Unity 2018.4.22f1 + Fungus）上验证 TextAsset 与 MonoBehaviour 双通路，
+  2938 条全量回填、严格配对复检零误差；仍未验证的是加密 assetbundle 和
+  IL2CPP 包（后者静态改不动，检测阶段就会提示走 BepInEx）
 - `*.rpa` 解包（`unrpa -m` 标准用法，很老的 Ren'Py 5/6 版本可能不兼容）
 - 跨大版本移植（8.5 的 Linux 引擎 + 7.3 的 Windows 游戏）：会给警告，未实测
 - RPG Maker MV/MZ 的 nw.js 换壳：给的是流程，未在本机跑过（没装 nw.js）

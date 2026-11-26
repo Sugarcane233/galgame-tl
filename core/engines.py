@@ -1049,8 +1049,11 @@ class RPGMakerAdapter(EngineAdapter):
             log(f"  以 data → {bak.name} 为基准重建，避免叠加旧译文")
         per_file: dict[str, list] = {}
         for it in items:
-            dst = (it.get("dst") or "").strip()
-            if not dst or dst == it["src"]:
+            # 注意：不能对译文做 .strip()。Fungus 这类框架把「换行」也当
+            # 排版信息（'Go back\n'），剥掉尾随换行会让菜单项粘连。
+            # 空校验用 strip()，实际写入用原值。
+            dst = it.get("dst") or ""
+            if not dst.strip() or dst == it["src"]:
                 continue
             fn = it["file"]
             rest = it["path"][len(fn):].lstrip("/")
@@ -1097,135 +1100,362 @@ class RPGMakerAdapter(EngineAdapter):
 
 
 # ==================================================================== Unity
+# TextAsset 行级过滤：判定「这一行像不像要翻的文本」
+# 顺序按开销从低到高；任何一条命中就直接丢弃。
+_TA_CONFIG_LINE = re.compile(
+    r"^(?:[\w.\-]+\s*=\s*[^\s].*"                # key = value
+    r"|[\[{<].*[\]}>]\s*$"                      # 整行是 JSON / XML / 括号块
+    r"|\d+[\s,;|]+\d+.*"                          # 纯数字表
+    r"|[-_=*#~]{3,}\s*$"                          # 分隔线
+    r"|\"\s*:\s*[\[{]"                           # "key" : [
+    r"|\"[^\"]{0,120}\"\s*,?\s*$"               # "some.value",
+    # 配置键必须小写开头、不含空格：'size: 332, 294' 挡掉，
+    # 但 'Alice: Good morning.' 这种「名字+冒号」的台词不能挡
+    r"|[a-z_][\w.\-]{0,30}:\s*[\w\d\-., ]+$"       # size: 332, 294 / format: RGBA8888
+    r"|[a-z_][\w.\-]{0,30}:\s*(?:true|false|-?\d+)\s*$"  # rotate: true
+    r")"                                        # 闭合 ^(?: ... )
+)
+# 文件名 / 资源路径：'BJ park - edit 6.png'
+_TA_ASSET_LINE = re.compile(
+    r"\.(?:png|jpe?g|gif|bmp|psd|tga|wav|ogg|mp3|mp4|anim|controller|prefab|mat|asset|"
+    r"shader|cs|lua|json|xml|txt|bytes|dll|so|meta|unity|fbx)(?:\s|$)",
+    re.I)
+# 至少要有一个「像单词」的片段：2 个字母以上的英文词，或任意中日文字符
+_TA_WORD_RX = re.compile(
+    r"[A-Za-z][A-Za-z'\u2019\-]{1,}|[\u3040-\u30ff\u3400-\u9fff]")
+
+
+def _ta_line_ok(t: str) -> bool:
+    """TextAsset 的一行要不要翻。t 是 strip 过的行。"""
+    if len(t) < 2 or _TA_CONFIG_LINE.match(t) or _TA_ASSET_LINE.search(t):
+        return False
+    if not _TA_WORD_RX.search(t):
+        return False
+    # 单个词（无空格、无换行、无 CJK）：'blush' / 'rotate' 这类字段名
+    has_cjk = bool(re.search(r"[\u3040-\u30ff\u3400-\u9fff]", t))
+    if not has_cjk and " " not in t:
+        return False
+    # 符号占比过高：断行表那种一整串标点
+    meaningful = sum(1 for c in t if c.isalnum() or c.isspace() or c in "'’\"-,.!?;:")
+    if meaningful / len(t) < 0.6:
+        return False
+    return True
+
+
 class UnityAdapter(EngineAdapter):
+    """Unity 游戏的文本提取与回填。
+
+    两条通路
+    --------
+    1. **TextAsset**：文本以纯文本资源存在（.txt / .json / .csv / .yarn）。
+       直接读 `m_Script`，按行定位。
+    2. **MonoBehaviour 裸字节**：对话框架（Fungus / Yarn / 自研）把文本存
+       在组件的字段里，且没有 TypeTree。用 `unity_mb` 扫
+       `[int32 长度][UTF-8]` 序列定位，记 (文件, path_id, 字段偏移)。
+
+    为什么后者是主力
+    ----------------
+    实测 1.2G 的 Unity 游戏（Fungus 框架）：TextAsset 只有 11 个且全是
+    Lua 脚本 / 字体表；真正的 3139 段对话全在 MonoBehaviour 里。只做
+    TextAsset 等于什么都没翻。
+
+    幂等性
+    ------
+    回填前把整个文件备份成 `<名字>.orig`（只备份一次）。重复跑时：
+    * 提取阶段——若 `.orig` 存在，**从备份读**，保证提取的永远是原文；
+    * 回填阶段——从 `.orig` 重新载入再改，避免多次运行叠加。
+    """
+
     name = "unity"
 
+    # 扫描范围。level* 是场景（对话多在这儿），*.assets 是共享资源
+    # （prefab 上的文字多见于此）。StreamingAssets 里的 .bundle 也收。
+    _PATTERNS = ("*_Data/level*", "*_Data/*.assets", "*_Data/*.unity3d",
+                 "*_Data/StreamingAssets/*.bundle", "*.bundle", "*.unity3d")
+
+    def _targets(self, root: Path) -> list[Path]:
+        seen: set[str] = set()
+        out: list[Path] = []
+        for pat in self._PATTERNS:
+            for f in sorted(root.glob(pat)):
+                if not f.is_file() or f.stat().st_size < 1024:
+                    continue
+                # .resS / .resource 是纯数据流，没有对象表，跳过
+                if f.suffix in (".resS", ".resource", ".manifest"):
+                    continue
+                # .orig 是我们自己的原文快照，绝不能当扫描目标 ——
+                # 否则第二次跑会把快照和正本各扫一遍，条目直接翻倍
+                if f.name.endswith(".orig"):
+                    continue
+                rp = str(f.resolve())
+                if rp in seen:
+                    continue
+                seen.add(rp)
+                out.append(f)
+        return out
+
+    def _source(self, p: Path) -> Path:
+        """提取/回填都从 .orig 快照读，保证反复跑不叠加。"""
+        bak = p.with_suffix(p.suffix + ".orig")
+        return bak if bak.exists() else p
+
+    def _snapshot(self, p: Path, log) -> None:
+        bak = p.with_suffix(p.suffix + ".orig")
+        if not bak.exists():
+            try:
+                shutil.copy2(p, bak)
+            except Exception as e:
+                log(f"  ! 备份 {p.name} 失败: {e}")
+
+    # ---------------------------------------------------------- 提取
     def extract(self, root: Path, log) -> list[dict]:
         try:
             import UnityPy
-            from UnityPy.enums import ClassIDType
         except ImportError:
-            raise RuntimeError("缺少 UnityPy: uv pip install UnityPy")
+            raise RuntimeError("缺少 UnityPy：uv pip install UnityPy")
+        from . import unity_mb
+
         items: list[dict] = []
-        cand = []
-        for pat in ("*_Data/*.assets", "*.assets", "*_Data/StreamingAssets/*.bundle",
-                    "*.bundle", "*.unity3d"):
-            cand.extend(sorted(root.glob(pat)))
-        seen = set()
-        for f in cand:
-            rp = str(f.resolve())
-            if rp in seen or f.stat().st_size < 1024:
-                continue
-            seen.add(rp)
+        files = self._targets(root)
+        log(f"  扫描 {len(files)} 个资源文件…")
+
+        n_ta = n_mb = 0
+        for p in files:
+            src_path = self._source(p)
             try:
-                env = UnityPy.load(str(f))
+                env = UnityPy.load(str(src_path))
             except Exception as e:
-                log(f"  ! 载入失败 {f.name}: {e}")
+                log(f"  ! 载入 {p.name} 失败: {e}")
                 continue
-            rel = str(f.relative_to(root))
+            rel = str(p.relative_to(root))
+
             for obj in env.objects:
-                if obj.type != ClassIDType.TextAsset:
-                    continue
                 try:
-                    d = obj.read()
-                    name = getattr(d, "m_Name", "") or ""
-                    script = getattr(d, "m_Script", None)
-                    if isinstance(script, str):
-                        raw = script.encode("latin-1", "ignore")
-                    elif isinstance(script, (bytes, bytearray)):
-                        raw = bytes(script)
-                    else:
-                        raw = bytes(script) if script else b""
+                    raw = obj.get_raw_data()
                 except Exception:
                     continue
-                text = None
-                for enc in ("utf-8", "utf-16-le", "shift_jis", "cp932", "euc-jp"):
-                    try:
-                        t = raw.decode(enc)
-                    except Exception:
-                        continue
-                    if t and re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", t):
-                        text = t
-                        break
-                if not text:
+                if not raw:
                     continue
-                for i, line in enumerate(text.split("\n")):
-                    s = line.rstrip("\r")
-                    if len(s.strip()) < 2 or not re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", s):
-                        continue
-                    items.append({"id": f"{rel}::{name}::{i}", "src": s, "who": "",
-                                  "label": name, "file": rel, "line": i, "kind": "ta",
-                                  "ta_name": name})
-        log(f"  从 TextAsset 抽出 {len(items)} 条")
+
+                if obj.type.name == "TextAsset":
+                    got = self._extract_text_asset(obj, raw, rel)
+                    if got:
+                        items.extend(got)
+                        n_ta += 1
+                    continue
+
+                if obj.type.name != "MonoBehaviour":
+                    continue
+
+                # 剥掉 MonoScript 头的 12 字节再扫，避免把 m_Script 的
+                # GUID 当文本。头上的 m_GameObject / m_Enabled 定长，
+                # 但不同版本长度不同，所以直接整段扫 —— 长度校验会兜住。
+                fields = unity_mb.scan(raw)
+                for f in fields:
+                    items.append({
+                        "id": f"{rel}::mb:{obj.path_id}:{f.offset}",
+                        "src": f.text, "who": "", "label": f"MonoBehaviour",
+                        "file": rel, "kind": "mb",
+                        "mb_path_id": obj.path_id, "mb_offset": f.offset,
+                        "mb_len": f.length,
+                    })
+                if fields:
+                    n_mb += 1
+
+        log(f"  TextAsset {n_ta} 个 / MonoBehaviour {n_mb} 个 → {len(items)} 条文本")
         if not items:
-            log("  提示：文本可能在 MonoBehaviour（IL2CPP）里，静态改不了，需 BepInEx 路线")
+            log("  提示：可能是 IL2CPP 且文本在全局元数据里，静态改不动；"
+                "这类需要 BepInEx + XUnity 的运行时方案")
         return items
 
+    @staticmethod
+    def _extract_text_asset(obj, raw: bytes, rel: str) -> list[dict]:
+        """TextAsset 按行提取。只收像对话的行，跳过脚本/配置。"""
+        try:
+            d = obj.read()
+            name = getattr(d, "m_Name", "") or ""
+            script = getattr(d, "m_Script", None)
+        except Exception:
+            return []
+        if script is None:
+            return []
+        if isinstance(script, str):
+            text = script
+        else:
+            text = None
+            for enc in ("utf-8", "utf-16-le", "shift_jis", "cp932", "euc-jp"):
+                try:
+                    text = bytes(script).decode(enc)
+                    break
+                except Exception:
+                    continue
+            if text is None:
+                return []
+
+        # 脚本类 TextAsset（.lua/.cs/.js）整篇跳过：里面没有要翻的台词，
+        # 逐行扫会误抓注释和字符串字面量
+        head = text[:400]
+        if re.search(r"^\s*(?:--|//|local\s+\w+\s*=|function\s|def\s|#include)",
+                     head, re.M):
+            return []
+        # 整篇是合法 JSON 的（配置 / 版本清单 / 序列化数据）整块跳过，
+        # 逐行筛会把每个字符串值都当台词
+        stripped = text.strip()
+        if stripped[:1] in ("{", "[") or '":' in head or '":' in stripped[:200]:
+            try:
+                json.loads(stripped)
+                return []
+            except Exception:
+                pass
+
+        lines = text.split("\n")
+        hits: list[tuple[int, str]] = []
+        for i, line in enumerate(lines):
+            s = line.rstrip("\r")
+            if s.strip() and _ta_line_ok(s.strip()):
+                hits.append((i, s))
+
+        # 整篇比例闸：技术性 TextAsset（Lua / atlas 元数据 / 类型清单）
+        # 里能"碰巧"像台词的短行很少，比例很低就整篇丢弃。
+        # 0.15 是实测阈值：真剧情文件命中率都在 0.5 以上。
+        if not hits or len(hits) / max(1, len(lines)) < 0.15:
+            return []
+
+        out: list[dict] = []
+        for i, s in hits:
+            out.append({
+                "id": f"{rel}::{name}::{i}", "src": s, "who": "",
+                "label": name, "file": rel, "kind": "ta",
+                "ta_name": name, "line": i,
+            })
+        return out
+
+    # ---------------------------------------------------------- 回填
     def apply(self, root: Path, items: list[dict], log) -> int:
         try:
             import UnityPy
-            from UnityPy.enums import ClassIDType
         except ImportError:
             raise RuntimeError("缺少 UnityPy")
-        by_file: dict[str, dict[str, list]] = {}
+        from . import unity_mb
+
+        # 按 (文件, path_id) 聚合，每个对象内按偏移降序应用
+        by_obj: dict[tuple[str, int], list[tuple[int, int, str, str]]] = {}
+        by_ta: dict[tuple[str, str], list[tuple[int, str]]] = {}
         for it in items:
-            dst = (it.get("dst") or "").strip()
-            if not dst or dst == it["src"]:
+            # 注意：不能对译文做 .strip()。Fungus 这类框架把「换行」也当
+            # 排版信息（'Go back\n'），剥掉尾随换行会让菜单项粘连。
+            # 空校验用 strip()，实际写入用原值。
+            dst = it.get("dst") or ""
+            if not dst.strip() or dst == it["src"]:
                 continue
-            by_file.setdefault(it["file"], {}).setdefault(it["ta_name"], []).append(
-                (it["line"], dst))
-        n = 0
-        for rel, groups in by_file.items():
+            kind = it.get("kind")
+            if kind == "ta":
+                by_ta.setdefault((it["file"], it["ta_name"]), []).append(
+                    (it["line"], dst))
+            elif kind == "mb":
+                by_obj.setdefault((it["file"], it["mb_path_id"]), []).append(
+                    (it["mb_offset"], it["mb_len"], it["src"], dst))
+        if not by_obj and not by_ta:
+            log("  没有需要回填的条目")
+            return 0
+
+        files = sorted({k[0] for k in by_obj} | {k[0] for k in by_ta})
+        total = 0
+        for rel in files:
             p = root / rel
-            bak = Path(str(p) + ".orig")
-            if not bak.exists():
-                shutil.copy2(p, bak)
+            if not p.exists():
+                log(f"  ! 文件不见了: {rel}")
+                continue
+            self._snapshot(p, log)
+            src_path = self._source(p)     # 从快照重建，避免叠加
             try:
-                env = UnityPy.load(str(p))
+                env = UnityPy.load(str(src_path))
             except Exception as e:
                 log(f"  ! 载入 {rel} 失败: {e}")
                 continue
+
+            changed = 0
             for obj in env.objects:
-                if obj.type != ClassIDType.TextAsset:
-                    continue
-                try:
-                    d = obj.read()
-                    name = getattr(d, "m_Name", "") or ""
-                    script = getattr(d, "m_Script", None)
-                    raw = script.encode("latin-1", "ignore") if isinstance(script, str) else bytes(script or b"")
-                except Exception:
-                    continue
-                if name not in groups:
-                    continue
-                text = None
-                for enc in ("utf-8", "utf-16-le", "shift_jis", "cp932", "euc-jp"):
+                tname = obj.type.name
+                if tname == "MonoBehaviour":
+                    edits = by_obj.get((rel, obj.path_id))
+                    if not edits:
+                        continue
                     try:
-                        t = raw.decode(enc)
-                        if re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", t):
-                            text = t
-                            break
+                        raw = obj.get_raw_data()
                     except Exception:
                         continue
-                if not text:
-                    continue
-                lines = text.split("\n")
-                for ln, dst in groups[name]:
-                    if 0 <= ln < len(lines):
-                        cr = "\r" if lines[ln].endswith("\r") else ""
-                        lines[ln] = dst + cr
-                        n += 1
-                try:
-                    d.m_Script = "\n".join(lines)
-                    d.save()
-                except Exception as e:
-                    log(f"  ! 写回 {name} 失败: {e}")
+                    newraw, n = unity_mb.patch(raw, edits)
+                    if n:
+                        obj.set_raw_data(newraw)
+                        changed += n
+                elif tname == "TextAsset":
+                    try:
+                        d = obj.read()
+                        name = getattr(d, "m_Name", "") or ""
+                    except Exception:
+                        continue
+                    edits = by_ta.get((rel, name))
+                    if not edits:
+                        continue
+                    lines = str(getattr(d, "m_Script", "")).split("\n")
+                    hit = 0
+                    for ln, dst in edits:
+                        if 0 <= ln < len(lines):
+                            cr = "\r" if lines[ln].endswith("\r") else ""
+                            lines[ln] = dst + cr
+                            hit += 1
+                    if hit:
+                        try:
+                            d.m_Script = "\n".join(lines)
+                            d.save()
+                            changed += hit
+                        except Exception as e:
+                            log(f"  ! 写回 TextAsset {name} 失败: {e}")
+
+            if not changed:
+                continue
             try:
                 p.write_bytes(env.file.save())
+                total += changed
             except Exception as e:
-                log(f"  ! 保存 {rel} 失败，已回滚: {e}")
-                shutil.copy2(bak, p)
-        log(f"  回填 {n} 行")
-        return n
+                log(f"  ! 保存 {rel} 失败，已从快照回滚: {e}")
+                try:
+                    shutil.copy2(src_path, p)
+                except Exception:
+                    pass
+
+        log(f"  回填 {total} 处")
+        return total
+
+    def prepare(self, root: Path, log) -> None:
+        """提前给所有目标文件建 .orig 快照。
+
+        apply 里也会补建，但那是「改到哪个文件才备份哪个」；如果玩家在
+        翻译跑完前就点了取消、或者中途某个文件写坏，提前备份能保证任何
+        时刻都有原文可回滚。快照只建一次（已存在就跳过），所以反复跑不叠加。
+        """
+        files = self._targets(root)
+        made = 0
+        for p in files:
+            bak = p.with_suffix(p.suffix + ".orig")
+            if bak.exists():
+                continue
+            try:
+                shutil.copy2(p, bak)
+                made += 1
+            except Exception as e:
+                log(f"  ! 备份 {p.name} 失败: {e}")
+        if made:
+            log(f"  已备份 {made} 个资源文件到 *.orig（原文快照，回滚用）")
+
+    def finalize(self, root: Path, log) -> None:
+        """Unity 的字体由游戏自己带（TextMeshPro 字体资源），
+        换字体要重打包 SDF，静态改造做不到也不该做。
+        这里只做清理：把没人用的 .orig 快照删掉会丢原文，所以保留。"""
+        n = len(list(root.glob("*_Data/*.orig")))
+        if n:
+            log(f"  保留 {n} 个 .orig 原文快照（回滚用，别删）")
 
 
 ADAPTERS: dict[str, EngineAdapter] = {
