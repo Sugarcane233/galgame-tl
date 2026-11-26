@@ -34,11 +34,15 @@ import sys
 import tempfile
 
 from .llm import (PROTECT_RULES, protect, restore,
-                  mask_glossary, unmask_glossary, _PH_RX, _GL_RX, _SEQ_RX)
+                  mask_glossary, unmask_glossary, speaker_prefix,
+                  _PH_RX, _GL_RX, _SEQ_RX)
 
 # 控制码分两类，严重程度差很远：
 #   颜色/图标/变量 —— 丢了会让控制码外泄、显示错色、变量不展开，必须重翻
 #   节奏/换行     —— \. \| 只是停顿，模型常换成「……」或逗号，观感损失，不值得重翻
+# 译文里被翻掉的中文说话人标签：'无:' / '她：' 这种，1-4 个汉字 + 冒号
+_ZH_PREFIX_RX = re.compile(r"^([\u4e00-\u9fff]{1,4})\s*[:：]")
+
 _COLOR_RX = re.compile(r"\\[A-Za-z]+\[[^\[\]]*\]")
 _RHYTHM_RX = re.compile(r"\\[.{}|!^$ ]")
 
@@ -53,6 +57,53 @@ def _ctrl_counts(s: str) -> tuple[dict[str, int], dict[str, int]]:
     for m in _RHYTHM_RX.findall(s):
         rhythm[m] = rhythm.get(m, 0) + 1
     return color, rhythm
+
+
+def _restore_speakers(src: str, dst: str) -> str:
+    """把译文里被翻掉/丢掉的说话人前缀按原文补回来。
+
+    一条台词里可能有多个说话人（`Her:...\n\nYou:...`），每一段都要修，
+    不能只看开头。做法是逐段对齐：原文里第 k 个前缀，对应译文里第 k 段
+    开头，剥掉译文那段已有的（英文或中文）前缀，再换成原文的。
+
+    前缀数量对不上时不猜，原样返回 —— 那种情况交给调用方判重翻。
+    """
+    want = [m.group(0).lstrip("\n") for m in _ALL_SPEAKER_RX.finditer(src or "")]
+    if not want:
+        return dst
+    got = [m for m in _ALL_ANY_PREFIX_RX.finditer(dst or "")]
+    if len(got) < len(want):
+        # 译文里前缀全被翻没了：按段落数均摊补回去。
+        segs = _split_blocks(dst or "", len(want))
+        if len(segs) != len(want):
+            return dst
+        return "\n\n".join(w + b for w, b in zip(want, segs))
+
+    # 前缀个数够：把每段开头的旧前缀换成原文前缀
+    out: list[str] = []
+    pos = 0
+    for i, m in enumerate(got):
+        # m.start() 可能落在 \n\n 的第一个 \n 上，前缀本身从名字开始
+        name_start = m.start() + (2 if m.group(0).startswith("\n\n") else 0)
+        out.append((dst or "")[pos:name_start])
+        out.append(want[i] if i < len(want) else m.group(0).lstrip("\n"))
+        pos = m.end()
+    out.append((dst or "")[pos:])
+    return "".join(out)
+
+
+def _split_blocks(text: str, n: int) -> list[str]:
+    """按 \n\n 切成 n 段（不够就返回原样，让调用方放弃）。"""
+    segs = text.split("\n\n")
+    return segs if len(segs) == n else [text]
+
+
+# 原文里所有说话人前缀（每个 \n\n 段开头的 Name:）
+_ALL_SPEAKER_RX = re.compile(
+    r"(?:^|\n\n)([A-Za-z][A-Za-z0-9_ ]{0,14}):(?=\S)")
+# 译文里所有可能的旧前缀：英文 Name: 或中文 标签:／标签：
+_ALL_ANY_PREFIX_RX = re.compile(
+    r"(?:^|\n\n)([A-Za-z][A-Za-z0-9_ ]{0,14}|[\u4e00-\u9fff]{1,4})\s*[:：](?=\S)")
 
 
 def repair_one(src: str, dst: str, glossary: dict[str, str]
@@ -94,6 +145,13 @@ def repair_one(src: str, dst: str, glossary: dict[str, str]
     cb, _rb = _ctrl_counts(fixed)
     if ca != cb:
         return None, "ctrl_lost"
+
+    # 说话人前缀必须原样保留。历史缓存里有一批把它翻掉了的
+    # （实测 Together Again 的 `None:Are you sure...` → `无:你确定...`），
+    # 游戏拿这个前缀去 Character 表里查人，翻了就查不到 —— 头像和名字
+    # 全丢。这里能把前缀补回来就补，补不回来（原文前缀连字符都不知去哪了）
+    # 就删掉重翻。
+    fixed = _restore_speakers(src, fixed)
 
     if fixed == dst:
         return dst, "clean"

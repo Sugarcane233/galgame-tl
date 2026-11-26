@@ -310,7 +310,28 @@ class Backend:
 
 
 # ---------------------------------------------------------------- 占位符保护
+# 对话的「说话人前缀」。Fungus / 自研对话框把 `Her:` `You:` `None:` `Kaylee:`
+# 直接拼在台词前面，游戏拿它去 Character 表里查人（查不到就不显示头像/名字）。
+# 实测把 `None:` 翻成 `无:` 之后，这几条对话的角色解析当场失效。
+#
+# 判据用「冒号后紧跟非空白」：`Her:She nods.` 是前缀（分隔符，不是排版），
+# 而 `Day: {$day}` / `Slot 2: Cheat to rank 3` 冒号后有空格，是 UI 标签，
+# 必须照常翻译。实测 Together Again：前缀形态 179 条、UI 标签形态 68 条，
+# 用这条判据分得一干二净。
+_SPEAKER_RX = re.compile(
+    r"(?:^|(?<=\n))([A-Za-z][A-Za-z0-9_ ]{0,14}):(?=\S)(?![/\\])")
+
+
+def speaker_prefix(s: str) -> str:
+    """取出台词开头的说话人前缀（含冒号）。没有就返回空串。"""
+    m = _SPEAKER_RX.match(s or "")
+    return m.group(0) if m else ""
+
+
 PROTECT_RULES = [
+    # 说话人前缀排最前：它只是「人名 + 冒号」，和后面的规则不冲突，
+    # 但必须先生效，否则模型会顺手把 None 翻成「无」。
+    (_SPEAKER_RX, "SPEAKER"),
     # RPG Maker 的 \js<表达式> / \format<..> / \item<..> 必须排在方括号规则前，
     # 否则 \js[vulgar,pussy,0] 会被 RENPY_SUB 当成 [var] 吃掉前缀。
     (re.compile(r"\\[A-Za-z]+<[^<>]*>"), "RM_JS"),

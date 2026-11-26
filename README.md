@@ -579,7 +579,31 @@ len(squeezed) <= 2      → 拟声（Hehe→he / Mmmm→m）
 ```
 
 覆盖：Ren'Py `[var]` `{i}{w}{color=#fff}`、RPG Maker `\V[n] \N[n] \C[n]`、
-printf `%1 %d %s`、C# `{0}`。
+printf `%1 %d %s`、C# `{0}`，以及**对话的说话人前缀**（见下）。
+
+#### 说话人前缀必须保护（会弄坏游戏机制）
+
+Fungus / 自研对话框把 `Her:` `You:` `None:` `Kaylee:` 直接拼在台词前面，
+游戏拿这个字符串去 Character 表里查人，查不到就不显示头像和名字。
+
+实测 Together Again：`None:Are you sure you want to cheat...` 被翻成
+`无:你确定要作弊...`，那 3 条对话的角色解析当场失效。
+
+判据用**冒号后是否紧跟非空白**：
+
+| 形态 | 例子 | 判定 |
+|---|---|---|
+| `Name:` + 正文 | `Her:She nods her head.` | **前缀，保护** |
+| `Label: 值` | `Day: {$day}` / `Slot 2: Cheat to rank 3` | UI 标签，照常翻 |
+
+实测该作前缀形态 179 条、UI 标签形态 68 条，这条判据分得一干二净。
+
+`_SPEAKER_RX = re.compile(r"(?:^|(?<=\n))([A-Za-z][A-Za-z0-9_ ]{0,14}):(?=\S)(?![/\\])")`
+排在 `PROTECT_RULES` 最前。
+
+历史缓存里已经翻掉的前缀由 `cachefix._restore_speakers()` 补回：逐段对齐
+原文第 k 个前缀 ↔ 译文第 k 段开头，剥掉译文已有的英文/中文前缀再换成原文的
+（`无:` / `她：` 都能剥）。段落数对不上则不猜，删掉重翻。
 
 **顺序有讲究**：RPG Maker 的 `\V[n]` 必须在 Ren'Py 的 `[...]` 之前匹配，
 否则 `\V[3]` 会被拆成 `\V` + `[3]`。
