@@ -110,6 +110,24 @@ class PipelineOptions:
     # 快捷方式的显示名；留空 = 自动取（package.json 的 window.title 或目录名）
     shortcut_title: str = ""
 
+    # ---- Unity 专用 ----
+    # 回填方式。False = 直接改资源文件（默认，翻完即用，但受对象长度限制）；
+    # True = 运行时替换（装 BepInEx + XUnity.AutoTranslator，资源一个字节都不动）。
+    #
+    # 什么时候必须开 True：Unity 的 MonoBehaviour 没有 TypeTree，对象长度由
+    # Assembly-CSharp.dll 的类布局固定。译文变长会让 Unity 报
+    # `A scripted object has a different serialization layout when loading.`
+    # 并丢弃该对象 → 场景加载不出来 → 闪过 logo 后黑屏。硬凑等长又要截断译文
+    # （实测 950/2325 条放不下，最长超 155 字节）。
+    unity_runtime: bool = False
+    # 运行时模式下的目标语言（XUnity 的 Language 值，简体中文是 zh-CN）
+    unity_lang: str = "zh-CN"
+    # 运行时模式下的原文语言（XUnity 的 FromLanguage，供在线翻译器参考；
+    # 纯离线词表用不上，但必须填对，否则 XUnity 会跳过某些文本）
+    unity_from_lang: str = "en"
+    # 装完 BepInEx 后启动游戏一次做自检（约 45 秒）
+    unity_verify: bool = False
+
 
 @dataclass
 class PipelineResult:
@@ -142,6 +160,12 @@ class PipelineResult:
     shortcut_path: str = ""
     shortcut_icon: str = ""        # original / generated
     shortcut_launch: str = ""
+    # Unity 运行时模式：词表条数、要不要用 run_bepinex.sh 启动
+    runtime_entries: int = 0
+    runtime_lines: int = 0
+    runtime_launcher: str = ""
+    runtime_notes: list[str] = field(default_factory=list)
+    runtime_verified: str = ""     # "" / "ok" / 具体问题
 
     def summary(self) -> str:
         if not self.ok:
@@ -167,6 +191,18 @@ class PipelineResult:
         if self.shortcut_path:
             src = "游戏原图标" if self.shortcut_icon == "original" else "生成的字母图标"
             lines.append(f"启动快捷方式已创建（{src}）")
+        if self.runtime_entries:
+            lines.append(f"运行时汉化已就绪（词表 {self.runtime_entries} 条"
+                         + (f" / 单行 {self.runtime_lines} 条" if self.runtime_lines else "")
+                         + "，资源文件未改动）")
+            if self.runtime_launcher:
+                lines.append(f"请用这个启动游戏：{self.runtime_launcher}")
+            if self.runtime_verified == "ok":
+                lines.append("自检通过：零 serialization 警告、零 corrupted、文本已替换")
+            elif self.runtime_verified:
+                lines.append(f"自检有问题：{self.runtime_verified}")
+        for n in self.runtime_notes:
+            lines.append(f"· {n}")
         lines.append(f"耗时 {self.elapsed:.1f}s")
         return " / ".join(lines[:2]) + "\n" + "\n".join(lines[2:])
 
@@ -283,6 +319,10 @@ class Pipeline:
                 self.stage("apply", 0.9)
                 if self.opts.dry_run:
                     self.log("[回填] 预览模式，跳过写入")
+                elif self.opts.unity_runtime and self.det.engine == "unity":
+                    # 运行时模式：一个字节都不写进资源文件，改由 XUnity 在游戏
+                    # 进程里替换文本。直接改会因对象长度变化让游戏黑屏。
+                    self.log("[回填] 运行时模式：跳过资源写入，稍后用词表替换")
                 else:
                     self.log("[回填] 写入游戏…")
                     r.applied = adapter.apply(root, self.items, self.log)
@@ -294,6 +334,11 @@ class Pipeline:
             if "finalize" in steps:
                 self.stage("finalize", 0.97)
                 adapter.finalize(root, self.log)
+
+            if (self.opts.unity_runtime and self.det.engine == "unity"
+                    and "finalize" in steps and not self.opts.dry_run):
+                self.stage("runtime", 0.98)
+                self._step_unity_runtime()
 
             if "finalize" in steps and self.opts.make_shortcut and not self.opts.dry_run:
                 self.stage("shortcut", 0.99)
@@ -481,6 +526,68 @@ class Pipeline:
         self.result.shortcut_icon = res.icon_source
         self.result.shortcut_launch = res.launch
         self.log(f"[快捷方式] {res.summary()}")
+
+    def _step_unity_runtime(self):
+        """Unity 运行时汉化：装 BepInEx + XUnity、改配置、写离线词表。
+
+        为什么要有这一步
+        ----------------
+        Unity 的 MonoBehaviour 对象长度由 Assembly-CSharp.dll 里的类布局
+        固定。直接改资源文件让字符串变长，Unity 启动时报
+        `A scripted object has a different serialization layout when loading.`
+        并丢弃对象 → 场景加载失败 → 黑屏。所以这里不动资源，改由 XUnity
+        在进程内钩住 set_text 替换。
+
+        词表来源是本次翻译的缓存（`self.cache_path`），所以必须跑完
+        translate。缓存里是 `{原文: 译文}`，直接转成 XUnity 的
+        `原文=译文` 格式。
+        """
+        from . import unity_runtime as urt
+
+        root = Path(self.det.root) if self.det else Path(self.opts.target)
+        cache: dict[str, str] = {}
+        if self.cache_path and Path(self.cache_path).is_file():
+            try:
+                cache = json.loads(Path(self.cache_path).read_text(encoding="utf-8"))
+            except Exception as e:
+                self.log(f"[运行时] 读缓存失败: {e}")
+        if not cache:
+            # 缓存读不到就退回用 items 的 dst（同样的内容，只是没去重）
+            cache = {it["src"]: it["dst"] for it in self.items
+                     if it.get("dst") and it["dst"].strip()}
+        if not cache:
+            self.log("[运行时] 没有译文可写，跳过")
+            return
+
+        res = urt.apply_runtime(
+            root, cache,
+            lang=self.opts.unity_lang,
+            from_lang=self.opts.unity_from_lang,
+            log=self.log,
+        )
+        self.result.runtime_entries = res.entries
+        self.result.runtime_lines = res.lines
+        self.result.runtime_launcher = res.launcher or ""
+        self.result.runtime_notes = list(res.notes)
+        for n in res.notes:
+            self.log(f"[运行时] {n}")
+        if not res.ok:
+            self.log("[运行时] 安装失败，退回不了资源回填（本次未写资源文件）")
+            return
+        self.log(f"[运行时] 完成：词表 {res.entries} 条 / 单行 {res.lines} 条")
+
+        if self.opts.unity_verify:
+            self.log("[运行时] 启动自检（约 45 秒）…")
+            v = urt.verify(root, self.log)
+            if v.get("ok"):
+                self.result.runtime_verified = "ok"
+            else:
+                self.result.runtime_verified = (
+                    v.get("error") or
+                    f"layout 警告 {v.get('layout_warnings')} 条 / "
+                    f"corrupted {v.get('corrupted')} 条"
+                )
+                self.log(f"[运行时] 自检发现问题：{self.result.runtime_verified}")
 
     def _dump_json(self):
         out_dir = self._out_dir()

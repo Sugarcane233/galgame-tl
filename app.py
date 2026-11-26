@@ -498,6 +498,17 @@ class MainWindow(QMainWindow):
         # 否则 lambda 里引用的属性还不存在）
         self.shortcut_check.toggled.connect(self.shortcut_desktop_check.setEnabled)
 
+        self.unity_rt_check = QCheckBox("Unity 运行时替换（不动资源文件）")
+        self.unity_rt_check.setToolTip(
+            "Unity 的 MonoBehaviour 对象长度由 Assembly-CSharp.dll 的类布局锁死。\n"
+            "直接改资源文件让译文变长，Unity 会报「different serialization layout」\n"
+            "并丢弃该对象 → 场景加载失败 → 闪过 logo 后黑屏（实测必现）。\n\n"
+            "勾上就改走运行时替换：装 BepInEx + XUnity.AutoTranslator，游戏启动时\n"
+            "用离线词表替换文本。资源文件一个字节都不动，译文不受原长度限制。\n"
+            "代价是以后要用 run_bepinex.sh 启动游戏（会顺手做成快捷方式）。\n"
+            "只在识别到 Unity 时生效。")
+        oc.addWidget(self.unity_rt_check, 4, 0, 1, 2)
+
         c3.body.addLayout(oc)
         root.addWidget(c3)
 
@@ -1091,6 +1102,10 @@ class MainWindow(QMainWindow):
             simplify=self.simp_check.isChecked(),
             make_shortcut=self.shortcut_check.isChecked(),
             shortcut_on_desktop=self.shortcut_desktop_check.isChecked(),
+            unity_runtime=self.unity_rt_check.isChecked(),
+            # GUI 里不开自检：自检要占住一个游戏窗口 45 秒，从界面跑很怪。
+            # 要查问题用 CLI 的 --unity-verify。
+            unity_verify=False,
         )
 
         self.log_view.clear()
@@ -1126,6 +1141,7 @@ class MainWindow(QMainWindow):
         "detect": "识别引擎", "prepare": "准备（解包/反编译）",
         "extract": "提取文本", "glossary": "生成术语表", "translate": "翻译",
         "apply": "写回游戏", "finalize": "字体与收尾",
+        "runtime": "配置运行时替换",
         "shortcut": "创建快捷方式", "done": "完成",
     }
 

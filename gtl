@@ -162,6 +162,10 @@ def cmd_run(a):
         make_shortcut=not getattr(a, "no_shortcut", False),
         shortcut_on_desktop=not getattr(a, "no_shortcut_desktop", False),
         shortcut_title=getattr(a, "shortcut_title", "") or "",
+        unity_runtime=getattr(a, "unity_runtime", False),
+        unity_lang=getattr(a, "unity_lang", "") or "zh-CN",
+        unity_from_lang=getattr(a, "unity_from_lang", "") or "en",
+        unity_verify=getattr(a, "unity_verify", False),
     )
     r = Pipeline(opts, _emit).run()
     print("\n" + "=" * 60)
@@ -170,6 +174,8 @@ def cmd_run(a):
         print("移植: " + r.ported)
     if r.shortcut_path:
         print(f"快捷方式: {r.shortcut_path}")
+    if r.runtime_launcher:
+        print(f"运行时启动: {r.runtime_launcher}（别再直接开游戏本体）")
     if r.json_path:
         print(f"提取结果: {r.json_path}")
     return 0 if r.ok else 1
@@ -231,6 +237,15 @@ def main():
                    help="快捷方式只加到应用列表，不放桌面")
     p.add_argument("--shortcut-title", default="",
                    help="快捷方式显示名（默认自动取游戏标题）")
+    p.add_argument("--unity-runtime", action="store_true",
+                   help="Unity 游戏用运行时替换（装 BepInEx+XUnity，资源文件不动）。"
+                        "译文比原文长很多时必用，否则游戏会黑屏")
+    p.add_argument("--unity-lang", default="zh-CN",
+                   help="运行时替换的目标语言（默认 zh-CN）")
+    p.add_argument("--unity-from-lang", default="en",
+                   help="运行时替换的原文语言（默认 en）")
+    p.add_argument("--unity-verify", action="store_true",
+                   help="装完启动游戏一次自检（约 45 秒）")
     p.set_defaults(fn=cmd_run)
 
     p = sub.add_parser("windows", help="Windows 版 Ren'Py 改造成 Linux 原生可跑")
