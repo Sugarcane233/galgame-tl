@@ -109,6 +109,44 @@ update-desktop-database ~/.local/share/applications 2>/dev/null || true
 
 跑完直接开游戏就是中文了。想还原见[还原](#还原)。
 
+### 启动快捷方式
+
+汉化收尾时会自动给游戏建一个启动快捷方式（默认开，界面上可关）：
+
+```
+~/.local/share/applications/<游戏名>-<hash>.desktop   应用列表里可见
+~/桌面/<同样的文件名>.desktop                          桌面（可关）
+```
+
+**图标一律用游戏自带的**，绝不换成工具自己的图标 —— 翻过十几个游戏之后
+摆一排全是同一个图标就分不清谁是谁了。
+
+| 引擎 | 图标来源 |
+|---|---|
+| Ren'Py | `game/gui/window_icon.png`（几乎每个游戏都有，256×256）→ `game/icon.png` |
+| RPG MV/MZ | `icon/icon.png`（nw.js 的 `window.icon`）→ `package.json` 里 `window.icon` 指的路径 |
+| Unity | Linux 版的图标编进可执行文件了，静态抠不出来；`icon.png` 存在就用 |
+| VX Ace | 同上，没有图标文件 |
+
+找不到原图时退回**字母图标**：用游戏显示名首字 + 名字哈希决定的固定配色画一张
+256×256 圆角 PNG。它不是原图标，但同一游戏每次生成的完全一样。
+
+启动器怎么挑：`detect` 的结论优先，然后按 `*.x86_64` > `*.AppImage` > `*.sh` > `Game`
+打分，排除 `uninstall` / `crashhandler` / `dotnet` / `steam_api` 这类不是本体的。
+
+`.sh` 类型的启动器走 `bash <脚本>`，不依赖文件本身有没有执行位。
+
+幂等：同一个游戏重复生成会覆盖同一个文件（文件名由目录名 + 路径哈希决定）。
+
+命令行同样可用：
+
+```bash
+./gtl run <游戏目录> --base-url workbuddy: --model deepseek-v4.1-flash
+./gtl run <游戏目录> --no-shortcut          # 不建快捷方式
+./gtl run <游戏目录> --no-shortcut-desktop  # 只放应用列表，不放桌面
+./gtl run <游戏目录> --shortcut-title "我的游戏"   # 自定义显示名
+```
+
 ---
 
 ## 界面怎么用
@@ -428,9 +466,9 @@ mask_glossary("おはよう、ご主人様。", {"ご主人様": "主人"})
 
 **手工维护的表永远优先**：自动生成只补空缺，不会改掉你手填的译名。
 
-#### 两个踩过的坑
+#### 四个踩过的坑
 
-**坑 1：片假名贪婪匹配吃掉了人名。**
+**坑 A：片假名贪婪匹配吃掉了人名。**
 `[ァ-ヺヽヾー]{2,}` 会把「リリスちゃん」整串当一个词，真正的人名 `リリス`
 抓不到。修成在敬称/助词处断开的先行断言：
 
@@ -440,7 +478,7 @@ r"|は|が|を|に|で|と|も|の|へ|や|か|ね|よ|な|だ|です|ます|$"
 r"|[。、！？…\s「」『』（）])"
 ```
 
-**坑 2：英文游戏里普通名词被当专名。**
+**坑 B：英文游戏里普通名词被当专名。**
 `LATIN_NAME_RE` 只看首字母大写，于是 `King→国王`、`Lady→夫人`、
 `Master→主人`、`Lust→欲望`、`Goddess→女神` 全被收进表。
 
@@ -462,6 +500,48 @@ r"|[。、！？…\s「」『』（）])"
 
 实现：`_LATIN_WORD_RE` + `_too_lower()` + `LATIN_LOWER_CUT = 0.03`。
 效果：60 条 → **89 条**，且垃圾条目清零。
+
+**坑 C：只认 `kind == "dialogue"`，把非 Ren'Py/非 MZ 的引擎整片漏掉。**
+
+`collect_candidates()` 原来写的是 `if it.get("kind") != "dialogue": continue`。
+但各引擎给对话起的 kind 名根本不一样：
+
+| 引擎 | 对话的 kind |
+|---|---|
+| Ren'Py | `dialogue` / `string` |
+| RPG Maker MV/MZ | `dialogue`（401 指令）/ `string` / `choice` |
+| RPG Maker VX Ace | `dialogue`（CommonEvents）/ `choice` / `name` |
+| **Unity** | **`mb`**（MonoBehaviour 裸字节）/ `ta`（TextAsset） |
+
+后果：Unity 游戏的候选数**恒为 0**，自动术语表对它完全失效，而且不报错——
+只是"没有新发现"。
+
+修法改成黑名单 `_NON_DIALOGUE_KINDS = {string, choice, name, ta}`：只排除
+确定不是台词的（界面文案、选项按钮、数据库名、脚本类 TextAsset），
+其余一律当台词统计。宁可多统计，也不要把某个引擎整片漏掉。
+
+**坑 D：拟声词被当人名。**
+
+Unity/Fungus 游戏的台词里 `Mmmm` / `Oooh` / `Aaah` / `Hehe` / `Nnngh`
+出现频率很高，全被拉丁名规则收成候选。`_is_onomatopoeia()` 的判定：
+
+```python
+squeezed = re.sub(r"(.)\1+", r"\1", word.lower())   # 注意先 lower 再压缩
+len(squeezed) <= 2      → 拟声（Hehe→he / Mmmm→m）
+无元音                  → 拟声（Nnngh / Mmmph）
+元音占比 > 75%          → 拟声（Oooh / Aaah）
+四字符 ABAB（Hehe/Mimi）→ 拟声
+```
+
+**必须先 lower 再 sub**：`Oooh` 首字母大写，直接 sub 时和后面的 `o`
+构不成反向引用，压缩后还是 `ooh` 而不是 `oh`，规则失效。
+
+效果（Together Again）：76 → 35 条候选，`Mmmm`/`Oooh`/`Aaah` 全清，
+真名 `Kaylee` / `Clara` / `Atlas` / `Mistress` 全部保住。
+
+也不要再加「辅音+元音交替」这类宽规则 —— 实测会把 `Kaylee` / `Clara` /
+`Type` 一起判成拟声。剩下的漏网（`Mmmeaoww`）交给模型自己拒，
+`ANALYST_SYSTEM` 里已经写明「感叹词、拟声词不要收」。
 
 #### 手动编辑
 

@@ -159,12 +159,17 @@ def cmd_run(a):
         nv_model=getattr(a, "nv_model", "") or "",
         gf_fallback=not getattr(a, "no_gf_fallback", False),
         simplify=not getattr(a, "no_simplify", False),
+        make_shortcut=not getattr(a, "no_shortcut", False),
+        shortcut_on_desktop=not getattr(a, "no_shortcut_desktop", False),
+        shortcut_title=getattr(a, "shortcut_title", "") or "",
     )
     r = Pipeline(opts, _emit).run()
     print("\n" + "=" * 60)
     print(r.summary())
     if r.ported:
         print("移植: " + r.ported)
+    if r.shortcut_path:
+        print(f"快捷方式: {r.shortcut_path}")
     if r.json_path:
         print(f"提取结果: {r.json_path}")
     return 0 if r.ok else 1
@@ -220,6 +225,12 @@ def main():
                    help="关掉谷歌翻译兜底（第三道：前两道都拒的句子交给它）")
     p.add_argument("--no-simplify", action="store_true",
                    help="关掉收尾的繁转简清洗（默认开：把译文里混入的繁体统一成简体）")
+    p.add_argument("--no-shortcut", action="store_true",
+                   help="不创建启动快捷方式（默认会建，图标用游戏自带的）")
+    p.add_argument("--no-shortcut-desktop", action="store_true",
+                   help="快捷方式只加到应用列表，不放桌面")
+    p.add_argument("--shortcut-title", default="",
+                   help="快捷方式显示名（默认自动取游戏标题）")
     p.set_defaults(fn=cmd_run)
 
     p = sub.add_parser("windows", help="Windows 版 Ren'Py 改造成 Linux 原生可跑")

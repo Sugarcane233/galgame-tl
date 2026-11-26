@@ -101,6 +101,14 @@ class PipelineOptions:
     # 收尾时把译文里混入的繁体统一成简体（zhconv 的 zh-cn 档，连词汇一起转）。
     # 模型偶尔会滑到繁体，实测 TLS 8483 条译文有 1047 条混了繁体字。
     simplify: bool = True
+    # 汉化完成后给游戏建一个带原图标的启动快捷方式（.desktop）。
+    # 图标一律用游戏自带的（Ren'Py 的 window_icon.png / MZ 的 icon/icon.png），
+    # 找不到才退回按名字生成的字母图标。
+    make_shortcut: bool = True
+    # 顺便往桌面目录也放一份（GNOME 需要 trusted 标记才会显示成图标）
+    shortcut_on_desktop: bool = True
+    # 快捷方式的显示名；留空 = 自动取（package.json 的 window.title 或目录名）
+    shortcut_title: str = ""
 
 
 @dataclass
@@ -130,6 +138,10 @@ class PipelineResult:
     glossary_added: int = 0
     # Windows → Linux 移植结果（一句话）
     ported: str = ""
+    # 快捷方式
+    shortcut_path: str = ""
+    shortcut_icon: str = ""        # original / generated
+    shortcut_launch: str = ""
 
     def summary(self) -> str:
         if not self.ok:
@@ -152,6 +164,9 @@ class PipelineResult:
         if self.glossary_terms:
             lines.append(f"术语表 {self.glossary_terms} 条"
                          + (f"（新增 {self.glossary_added}）" if self.glossary_added else ""))
+        if self.shortcut_path:
+            src = "游戏原图标" if self.shortcut_icon == "original" else "生成的字母图标"
+            lines.append(f"启动快捷方式已创建（{src}）")
         lines.append(f"耗时 {self.elapsed:.1f}s")
         return " / ".join(lines[:2]) + "\n" + "\n".join(lines[2:])
 
@@ -279,6 +294,10 @@ class Pipeline:
             if "finalize" in steps:
                 self.stage("finalize", 0.97)
                 adapter.finalize(root, self.log)
+
+            if "finalize" in steps and self.opts.make_shortcut and not self.opts.dry_run:
+                self.stage("shortcut", 0.99)
+                self._step_shortcut()
 
             r.ok = True
         except Exception as e:
@@ -434,6 +453,34 @@ class Pipeline:
             preview = "、".join(s[:24] for s in res["failed"][:4])
             self.log(f"[翻译] {len(res['failed'])} 条未成功（保留原文）: {preview}…")
             self._emit("deferred", res["failed"])
+
+    def _step_shortcut(self):
+        """收尾时给游戏建启动快捷方式。
+
+        放在 finalize 之后：此时文件已经回填完、字体补丁也写好了，
+        快捷方式指向的启动器才是"已经改好的那个游戏"。
+        失败只记日志，不影响汉化结果。
+        """
+        from . import shortcut as sc
+
+        try:
+            res = sc.create(
+                Path(self.det.root) if self.det else Path(self.opts.target),
+                det=self.det,
+                title=self.opts.shortcut_title,
+                also_desktop=self.opts.shortcut_on_desktop,
+                log=self.log,
+            )
+        except Exception as e:
+            self.log(f"[快捷方式] 生成失败（不影响汉化）: {e}")
+            return
+        if not res.ok:
+            self.log(f"[快捷方式] {res.error}")
+            return
+        self.result.shortcut_path = res.desktop_path
+        self.result.shortcut_icon = res.icon_source
+        self.result.shortcut_launch = res.launch
+        self.log(f"[快捷方式] {res.summary()}")
 
     def _dump_json(self):
         out_dir = self._out_dir()

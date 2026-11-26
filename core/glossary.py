@@ -63,6 +63,16 @@ QUOTED_HANJI_RE = re.compile(r"[「『\"“]([一-龥]{2,8})[」』\"”]")
 # 「聖剣の力」→「聖剣」「力」，「魔導書を開け」→「魔導書」。
 KANJI_RUN_RE = re.compile(r"[一-龥]{2,6}")
 
+# 这些 kind 不是「人物说的台词」，统计术语时会带进界面词和配置串，
+# 所以 collect_candidates 里跳过；其余 kind（dialogue / mb / ta / 未标注）
+# 一律当台词处理 —— 宁可多统计，也不要把某个引擎整片漏掉。
+_NON_DIALOGUE_KINDS = frozenset({
+    "string",    # Ren'Py 的 menu 项 / 界面文案，RPG Maker 的非 401 字符串
+    "choice",    # 选项按钮
+    "name",      # 数据库里的角色名（本身就是术语，已随 items 进了，不用再统计）
+    "ta",        # Unity 的化本 TextAsset（多为脚本/配置，非台词）
+})
+
 # 常见外来语/界面词：长得像术语但其实是通用词。
 # 收进表里反而有害——它们本来就该按上下文灵活翻。
 STOP_KANA = {
@@ -100,7 +110,44 @@ STOP_LATIN = {
     "Was", "Were", "For", "From", "About", "Just", "Like", "Look", "Come",
     "Don", "Did", "Does", "Get", "Got", "Let", "May", "Might", "Must", "Need",
     "Okay", "Well", "Yeah", "Ohh", "Ahh", "Hmm", "Mmm", "God", "Oh",
+    # Unity / Fungus 这类框架的默认值，不是台词也不是人名
+    "None", "Null", "Menu", "Text", "New", "Empty", "Item", "Items",
+    "Back", "Next", "Close", "Open", "Save", "Load", "Start", "Quit",
 }
+
+# 拟声词判定：把重复字母压成一个后只剩 1-3 个字符的（Mmmm / Oooh / Aaah /
+# Mmmmmgggh），或者是纯元音串的，都不是术语。真名字压完至少 3 个字符
+# （Kaylee / Mistress / Atlas），所以这个阈值不会误杀。
+_ONO_MATOPOEIA = re.compile(r"^[A-Za-z]{2,}$")
+
+
+def _is_onomatopoeia(word: str) -> bool:
+    """判断一个拉丁词是不是拟声词/感叹词。"""
+    if not _ONO_MATOPOEIA.match(word):
+        return False
+    # 必须先 lower 再压缩：'Oooh' 里的首字母 O 是大写，直接 sub 时
+    # 和后面的 o 不构成反向引用，压缩不掉（实测得到 'ooh' 而不是 'oh'）。
+    squeezed = re.sub(r"(.)\1+", r"\1", word.lower())
+    # 压缩后 ≤2 字符的一定是拟声（Hehe→he / Mmmm→m / Oooh→oh）；
+    # 3 字符要留给真词（Nya / Kay / Ash / Max 都可能只是短名），
+    # 交给下面的元音规则判断。
+    if len(squeezed) <= 2:
+        return True
+    vowels = sum(1 for c in squeezed if c in "aeiouy")
+    # 完全没有元音：Mmmgh / Nnngh / Mmmph / Mmmng —— 真英文词一定有元音
+    if vowels == 0:
+        return True
+    # 元音占比过高：Oooh / Aaaah / Mmmeaoww
+    if vowels / len(squeezed) > 0.75:
+        return True
+    # 四字符 ABAB 重复：Hehe / Haha / Mimi（笑声类）。限定长度 4 且前后
+    # 两半完全相同，才不至于把 Kaylee / Clara / Type 这类真名字误杀。
+    if len(squeezed) == 4 and squeezed[:2] == squeezed[2:]:
+        return True
+    # 注意：不要再加「辅音+元音交替」这类模式 —— 实测会把 Kaylee / Clara /
+    # Type 这种真名字一起判成拟声。剩下的漏网（Mmmeaoww）交给模型自己拒，
+    # ANALYST_SYSTEM 里已经写明「感叹词、拟声词不要收」。
+    return False
 
 # Ren'Py 的 Character("显示名", ...) 定义。`Character(_("名字"))` 这种也吃。
 _CHAR_DEF_RE = re.compile(
@@ -168,7 +215,13 @@ def collect_candidates(items: list[dict], min_freq: int = 3,
             kind[word] = k
 
     for it in items:
-        if it.get("kind") != "dialogue":
+        # 不能只认 kind=="dialogue"。各引擎给对话起的 kind 名不一样：
+        #   rpgmaker(MV/MZ) → dialogue / string / choice / ta
+        #   rpgmaker_vxace → dialogue（CommonEvents）/ choice（选项）/ name（数据库名）
+        #   renpy          → dialogue / string
+        #   unity          → mb（MonoBehaviour 裸字节）/ ta（TextAsset）
+        # 只筛 dialogue 会让 Unity 游戏的候选数恒为 0，自动术语表整个失效。
+        if it.get("kind") in _NON_DIALOGUE_KINDS:
             continue
         src = it.get("src") or ""
         if not src:
@@ -215,6 +268,9 @@ def collect_candidates(items: list[dict], min_freq: int = 3,
     # 「King」「Lady」「Master」「Lust」这类普通称谓/名词就进不了候选。
     rows = [r for r in rows
             if kind[r[0]] != "latin" or not _too_lower(r[0], r[1], lower)]
+    # 拟声词 / 感叹词（Mmmm / Oooh / Aaah），以及压完只剩两三个字母的
+    rows = [r for r in rows
+            if kind[r[0]] != "latin" or not _is_onomatopoeia(r[0])]
     rows.sort(key=lambda r: (_rank(r[2]), -r[1]))
     return rows[:top_n]
 

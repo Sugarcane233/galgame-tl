@@ -480,6 +480,24 @@ class MainWindow(QMainWindow):
             "只在识别到 Windows 版 Ren'Py 时生效。")
         oc.addWidget(self.port_check, 2, 0, 1, 2)
 
+        self.shortcut_check = QCheckBox("完成后创建启动快捷方式")
+        self.shortcut_check.setChecked(True)
+        self.shortcut_check.setToolTip(
+            "汉化完成后在应用列表里加一个游戏启动项，图标用游戏自带的\n"
+            "（Ren'Py 的 window_icon.png / MZ 的 icon/icon.png）；\n"
+            "找不到原图才退回按名字生成的字母图标——不会换成工具自己的图标。\n"
+            "同时会往桌面目录放一份（GNOME 需要 trusted 标记才显示成图标）。")
+        oc.addWidget(self.shortcut_check, 3, 0)
+
+        self.shortcut_desktop_check = QCheckBox("桌面上也放一份")
+        self.shortcut_desktop_check.setChecked(True)
+        self.shortcut_desktop_check.setToolTip(
+            "取消勾选就只加到应用列表（开始菜单），不放桌面。")
+        oc.addWidget(self.shortcut_desktop_check, 3, 1)
+        # 主开关关掉时，「桌面上也放一份」跟着变灰（连接放在控件建好之后，
+        # 否则 lambda 里引用的属性还不存在）
+        self.shortcut_check.toggled.connect(self.shortcut_desktop_check.setEnabled)
+
         c3.body.addLayout(oc)
         root.addWidget(c3)
 
@@ -1071,6 +1089,8 @@ class MainWindow(QMainWindow):
             nv_fallback=self.nv_check.isChecked(),
             gf_fallback=self.gf_check.isChecked(),
             simplify=self.simp_check.isChecked(),
+            make_shortcut=self.shortcut_check.isChecked(),
+            shortcut_on_desktop=self.shortcut_desktop_check.isChecked(),
         )
 
         self.log_view.clear()
@@ -1105,7 +1125,8 @@ class MainWindow(QMainWindow):
     STAGE_LABEL = {
         "detect": "识别引擎", "prepare": "准备（解包/反编译）",
         "extract": "提取文本", "glossary": "生成术语表", "translate": "翻译",
-        "apply": "写回游戏", "finalize": "字体与收尾", "done": "完成",
+        "apply": "写回游戏", "finalize": "字体与收尾",
+        "shortcut": "创建快捷方式", "done": "完成",
     }
 
     def on_stage(self, name: str, pct: float):
