@@ -13,6 +13,7 @@
 - [这是什么](#这是什么)
 - [快速开始](#快速开始)
 - [界面怎么用](#界面怎么用)
+- [游戏库](#游戏库)
 - [支持的引擎](#支持的引擎)
 - [翻译模型](#翻译模型)
 - [三道翻译流水线](#三道翻译流水线)
@@ -173,7 +174,49 @@ update-desktop-database ~/.local/share/applications 2>/dev/null || true
 | **Windows 版改造成 Linux 原生** | 拖入 Windows 包自动勾上 |
 | **只翻译不写回** | 预览模式，产出 JSON 不碰游戏文件 |
 
+左侧导航分三组：**任务**（项目 / 运行）、**其它**（游戏库 / 设置）。
+
 所有设置用 `QSettings("galgame-tl", "galgame-tl")` 持久化，下次打开还在。
+
+---
+
+## 游戏库
+
+左侧导航第三项。汉化一个游戏不是一次性的 —— 翻到一半想换模型、跑完想补漏、
+改完术语表要重跑，每次都靠文件管理器翻目录太麻烦。游戏库把这些游戏收在一起：
+
+| 操作 | 说明 |
+|---|---|
+| **添加游戏目录** | 拖一层外层包目录也行，内层引擎目录也行，会自动归一成引擎根 |
+| **扫描本机游戏** | 在 `下载` / `桌面` / Steam 库等常见位置按目录广度优先找可识别的游戏（默认 3 层深） |
+| **打开目录** | `xdg-open` 打开游戏所在目录 |
+| **建快捷方式** | 在应用列表里创建启动入口。装了 BepInEx 的会走 `run_bepinex.sh`（否则词表不加载） |
+| **去汉化** | 跳回项目页并载入这个游戏，接着翻 / 补漏 |
+| **打开缓存** | 打开 `_galgame_tl/`，看缓存与快照 |
+| **启动** | 只在装了运行时汉化时出现。同样走 `run_bepinex.sh` |
+| **改名** | 只改库里显示的名字，不动目录 |
+| **删除** | 见下 |
+
+**删除是本工具唯一会真的删文件的地方，所以设计成三步**：
+
+1. 点「删除」不会立刻动手，先弹确认框；
+2. 确认框里逐条列出**真实路径**（不是「游戏数据」这种含糊说法），
+   游戏本体 / 汉化缓存 / 快捷方式三类分开勾选，默认只勾后两类；
+3. 确认后才执行，删完顺手清掉空掉的图标目录。
+
+内置三重保护：`/`、`/home`、`/usr` 这类系统目录硬拒；路径深度小于 3 的拒绝
+（`/home/xxx` 不像游戏目录）；缓存目录如果是游戏目录本身或其祖先也拒绝
+（否则「删缓存」等于「删游戏」）。这几条不是防用户，是防库文件被改坏或手滑。
+
+**缓存目录会在两处找**：`<游戏>/_galgame_tl/` 和 `<游戏>/../_galgame_tl/`。
+因为缓存落在哪取决于当初拖进去的是外层包目录还是内层引擎目录，两种都存在。
+删缓存时两处都删，否则会出现「删了但游戏里还是中文」。
+
+游戏库记录存在 `~/.local/share/galgame-tl/library.json`。**状态不缓存**：
+每次刷新都现场扫磁盘（引擎、缓存条数、快捷方式在不在），因为用户可能在
+文件管理器里删过东西，显示过期的「已汉化」比不显示更糟。
+
+另外，「开始汉化」时会自动把当前游戏收进库，不用手动加。
 
 ---
 
@@ -1447,7 +1490,10 @@ ad.apply(Path(GAME), app, print)      # ← 必须是 Path 对象，传 str 会�
 ```
 galgame-tl/
 ├── galgame-tl.sh          启动界面
-├── app.py                 GUI（PySide6，871 行）
+├── app.py                 GUI 主窗口（PySide6）
+├── library_page.py        游戏库页面：列表 / 扫描 / 快捷方式 / 删除
+├── ui_theme.py            浅色 Fluent 色板与 QSS
+├── ui_widgets.py          Card / StatCard / ProgressRing / Sidebar / 图标
 ├── gtl                    命令行（236 行）
 ├── core/
 │   ├── detect.py          引擎识别（395 行）
@@ -1460,6 +1506,11 @@ galgame-tl/
 │   ├── nvfallback.py      NVIDIA Nemotron 兜底（186 行）
 │   ├── gfallback.py       谷歌翻译兜底（180 行）
 │   ├── simplify.py        繁转简清洗（81 行）
+│   ├── shortcut.py        .desktop 启动快捷方式（图标优先用游戏原图）
+│   ├── library.py         游戏库：记录 / 探查 / 删除计划
+│   ├── unity_mb.py        Unity MonoBehaviour 裸字节扫描与回填
+│   ├── unity_runtime.py   Unity 运行时汉化（BepInEx + XUnity 词表）
+│   ├── cachefix.py        历史缓存清洗（占位符 / 说话人 / 控制码）
 │   ├── renv.py            Ren'Py 运行环境体检（libGLU / X11，183 行）
 │   ├── winport.py         Windows 版 → Linux 原生（394 行）
 │   └── vxace.py           VX Ace：RGSSAD 解包/重打包 + rvdata2 + 自解压（528 行）
@@ -1483,6 +1534,9 @@ galgame-tl/
 | `glossary` | 静态扫描 + 语料统计 + 模型确认 | `scan_character_defs` / `collect_candidates` / `build` |
 | `pipeline` | 七步流程：detect → prepare → extract → glossary → translate → apply → finalize | `Pipeline.run(steps)` |
 | `vxace` | RGSSAD v1/v2/v3 解包与重打包、rvdata2 文本定位、InstallShield 拆包 | `unpack` / `repack` / `collect` / `apply_all` |
+| `shortcut` | 生成 `.desktop`（图标优先游戏原图，找不到才画字母图） | `create(root, det, title)` |
+| `library` | 游戏库记录 / 现场探查 / 删除计划与执行 | `load` / `add` / `probe` / `plan_delete` / `apply_delete` |
+| `unity_mb` | Unity MonoBehaviour 裸字节里扫文本、按偏移回填 | `scan(raw)` / `patch(raw, edits)` |
 | `renv` | 补 libGLU、找 XAUTHORITY、读 log.txt 诊断 | `prepare` / `diagnose` |
 | `winport` | 换 `lib/py3-linux-*`、生成启动脚本 | `port(root, engine_src)` |
 | `nvfallback` / `gfallback` | 第二/第三道兜底 | `chat(lines, ctx)` / `translate(lines)` |

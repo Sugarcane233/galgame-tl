@@ -36,6 +36,8 @@ from core.llm import Backend                          # noqa: E402
 from core.pipeline import Pipeline, PipelineOptions   # noqa: E402
 import ui_theme                                       # noqa: E402
 from ui_widgets import Card, ProgressRing, Sidebar, StatCard   # noqa: E402
+import library_page                                            # noqa: E402
+from core import library as gamelib                            # noqa: E402
 
 APP_NAME = "galgame-tl"
 ORG = "galgame-tl"
@@ -309,12 +311,14 @@ class MainWindow(QMainWindow):
 
         self._build_page_project()
         self._build_page_run()
+        self._build_page_library()
         self._build_page_settings()
 
         self.nav.add_group("任务")
         self.nav.add_page("项目", "folder")
         self.nav.add_page("运行", "play")
         self.nav.add_group("其它")
+        self.nav.add_page("游戏库", "grid")
         self.nav.add_page("设置", "settings")
         self.nav.finish()
         self.nav.select(0)
@@ -619,6 +623,50 @@ class MainWindow(QMainWindow):
         root.addWidget(c2)
 
         root.addStretch(1)
+
+    # ---------------------------------------------------------- 页 3：游戏库
+    def _build_page_library(self):
+        self.library_page = library_page.LibraryPage(
+            win=self,
+            log=self.log,
+            goto_project=self.goto_project,
+            toast=self.toast,
+        )
+        self.stack.addWidget(self.library_page)
+
+    def goto_project(self, path):
+        """从游戏库跳到项目页并载入这个游戏。"""
+        self.nav.select(0)
+        self.on_drop(str(path))
+
+    def resizeEvent(self, e):
+        """窗口变化时把提示条重新贴到右下角。"""
+        super().resizeEvent(e)
+        lbl = getattr(self, "_toast_label", None)
+        if lbl is not None and lbl.isVisible():
+            lbl.move(self.width() - lbl.width() - 32,
+                     self.height() - lbl.height() - 132)
+
+    def toast(self, text: str, ms: int = 2600):
+        """轻提示。不打断操作，比弹窗体面 —— 存个 QLabel 挂在状态栏位置。"""
+        if not hasattr(self, "_toast_label") or self._toast_label is None:
+            lbl = QLabel(self)
+            lbl.setObjectName("toast")
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.hide()
+            self._toast_label = lbl
+        lbl = self._toast_label
+        lbl.setText(text)
+        lbl.adjustSize()
+        # 贴在右下角。不能放底部居中 —— 那里正是「开始汉化」页脚按钮的位置，
+        # 提示浮上去会挡住最该点的按钮，而且提示不可点穿。
+        w = lbl.width() + 32
+        h = lbl.height() + 16
+        lbl.resize(w, h)
+        lbl.move(self.width() - w - 32, self.height() - h - 132)
+        lbl.raise_()
+        lbl.show()
+        QTimer.singleShot(ms, lbl.hide)
 
     # ---------------------------------------------------------- 术语表
     GLOSSARY_PATH = Path(__file__).resolve().parent / "glossary.json"
@@ -1107,6 +1155,15 @@ class MainWindow(QMainWindow):
             # 要查问题用 CLI 的 --unity-verify。
             unity_verify=False,
         )
+
+        # 开跑就把这个游戏收进游戏库：反正都要翻，之后回来补漏、
+        # 建快捷方式、清缓存都得靠它，省得再手动加一次。
+        try:
+            self.library_page.add_path(self.current_target)
+            self.library_page.entries.sort(key=lambda x: (x.title or "").lower())
+            gamelib.save(self.library_page.entries)
+        except Exception as e:
+            self.log(f"[库] 收录失败（不影响翻译）: {e}")
 
         self.log_view.clear()
         self.bar.setValue(0)

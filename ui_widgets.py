@@ -49,6 +49,18 @@ _ICON_PATHS = {
     "doc": "M6 3h8l4 4v14H6V3zM14 3v4h4",
     # 闪电
     "bolt": "M13 2 4 14h6l-1 8 9-12h-6l1-8z",
+    # 游戏库 / 网格
+    "grid": "M4 4h6v6H4V4zM14 4h6v6h-6V4zM4 14h6v6H4v-6zM14 14h6v6h-6v-6z",
+    # 垃圾桶
+    "trash": "M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6",
+    # 刷新 / 扫描
+    "refresh": "M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4",
+    # 加号
+    "plus": "M12 5v14M5 12h14",
+    # 打开外部 / 跳转
+    "external": "M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5",
+    # 硬盘 / 存储
+    "disk": "M3 12h18M5 12l2-7h10l2 7M5 12v6a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-6M8 16h.01M12 16h.01",
 }
 
 _ICON_DIR = os.path.join(

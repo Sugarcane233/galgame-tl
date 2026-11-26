@@ -474,6 +474,104 @@ QFrame#dropzone[hover="true"] {{
     border: 1.5px dashed {ACCENT};
 }}
 
+/* ============================== 游戏库 ============================== */
+QFrame#gameRow {{
+    background: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+}}
+
+QFrame#gameRow:hover {{
+    border-color: {BORDER_HI};
+}}
+
+QLabel#gameTitle {{
+    font-size: 14.5px;
+    font-weight: 600;
+    color: {TEXT};
+}}
+
+QLabel#gameMeta {{
+    font-size: 12px;
+    color: {TEXT_DIM};
+}}
+
+QLabel#gamePath {{
+    font-size: 11.5px;
+    color: {TEXT_MUTE};
+}}
+
+QLabel#gameSize {{
+    font-size: 12.5px;
+    color: {TEXT_DIM};
+    font-weight: 600;
+}}
+
+QLabel#gameIcon {{
+    background: transparent;
+}}
+
+/* 删除按钮：描边红字，不抢主操作的视线 */
+QPushButton#danger {{
+    background: #ffffff;
+    border: 1px solid #edc7c7;
+    color: #d14343;
+    font-size: 12px;
+    padding: 5px 12px;
+    border-radius: 6px;
+    min-height: 16px;
+}}
+
+QPushButton#danger:hover {{
+    background: #fdf1f1;
+    border-color: #e0a9a9;
+}}
+
+QPushButton#danger:disabled {{
+    background: #f7f7f8;
+    border-color: {BORDER};
+    color: {TEXT_MUTE};
+}}
+
+/* 删除确认框 */
+QLabel#dlgTitle {{
+    font-size: 16px;
+    font-weight: 600;
+    color: {TEXT};
+}}
+
+QLabel#dlgTip {{
+    font-size: 12.5px;
+    color: {WARN};
+    background: #fdf6e7;
+    border: 1px solid #f2e2c2;
+    border-radius: 8px;
+    padding: 10px 14px;
+}}
+
+QFrame#delItem {{
+    background: {CARD_ALT};
+    border: 1px solid {BORDER};
+    border-radius: 9px;
+}}
+
+QLabel#delPath {{
+    font-family: "JetBrains Mono", "Cascadia Mono", "DejaVu Sans Mono",
+                 "Noto Sans Mono", monospace;
+    font-size: 11.5px;
+    color: {TEXT_MUTE};
+    padding-left: 22px;
+}}
+
+/* 右下角轻提示 */
+QLabel#toast {{
+    background: rgba(31, 35, 41, 0.94);
+    color: #ffffff;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 12.5px;
+}}
+
 /* ============================== 提示条 ============================== */
 QLabel#infobox {{
     background: {ACCENT_SOFT};
