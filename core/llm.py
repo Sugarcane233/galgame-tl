@@ -34,7 +34,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 # ----------------------------------------------------------------- 拒绝检测
@@ -109,6 +109,25 @@ def _is_rate_limited(exc: Exception) -> bool:
         if kw in s:
             return True
     return False
+
+
+def _reset_ts(exc: Exception) -> float:
+    """从限流错误里扒出「几点重置」，转成时间戳。扒不到返回 0。
+
+    上游写的是 `将在 2026-11-28 22:02:13 UTC+8 重置`。这个时间可能是
+    几个小时后，**不能用来 sleep**，但可以用来判断这个模型值不值得再试：
+    到点了就自动解除标记。
+    """
+    s = str(exc)
+    m = re.search(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})", s)
+    if not m:
+        return 0.0
+    try:
+        import datetime as _dt
+        dt = _dt.datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M:%S")
+        return dt.timestamp()
+    except Exception:
+        return 0.0
 
 
 def looks_like_refusal(text: str, src: str = "") -> bool:
@@ -195,6 +214,19 @@ class Backend:
     # wb=True 表示"用直连"，缓存下来的 Account 放 _wb_acc。
     wb: bool = False
     _wb_acc: object = None
+    # 模型降级链。WorkBuddy 的配额是**按模型**算的（实测 2026-11-27：
+    # deepseek-v4.1-flash 报 429 说 24 小时后重置，同一账号的
+    # deepseek-v4-flash 照样 2 秒返回 20 条）。只轮换账号不换模型的话，
+    # 主账号该模型耗尽后就只能干等到重置时间。
+    # 这里按「同代优先」排：v4-flash 和 v4.1-flash 是一代产品，术语和文风
+    # 接得上；glm / kimi 放后面只是为了让任务别停，不是说它们等价。
+    model_fallbacks: tuple = (
+        "deepseek-v4-flash",
+        "glm-5.3-flash",
+        "kimi-k3-1",
+    )
+    _model_dead: dict = field(default_factory=dict)   # model -> 到期时间戳
+    _active_model: str = ""
 
     def use_wb(self) -> bool:
         return bool(self.wb) or self.base_url.startswith("workbuddy:")
@@ -265,26 +297,123 @@ class Backend:
         except Exception:
             return []
 
+    def __post_init__(self):
+        if not self._active_model:
+            self._active_model = self.model
+
+    def current_model(self) -> str:
+        return self._active_model or self.model
+
+    def _model_candidates(self) -> list[str]:
+        """按当前偏好排出的候选模型：主模型，然后是没被判定为耗尽的备胎。"""
+        now = time.time()
+        out = [self.current_model()]
+        for m in self.model_fallbacks:
+            if m == self.model or m in out:
+                continue
+            until = self._model_dead.get(m, 0)
+            if until and until > now:
+                continue
+            out.append(m)
+        return out
+
+    def _lock_for_models(self):
+        import threading
+        lock = getattr(self, "_mdl_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._mdl_lock = lock
+        return lock
+
+    def mark_model_dead(self, model: str, until: float = 0.0) -> bool:
+        """把一个模型标记为「暂时不可用」，切到下一个还有额度的。
+
+        返回 True 表示已经换到另一个模型，调用方应该直接重试。
+        """
+        with self._lock_for_models():
+            self._model_dead[model] = until or (time.time() + 1800)
+            cands = self._model_candidates()
+            if len(cands) <= 1:
+                return False
+            self._active_model = cands[1]
+            return True
+
+    def describe_routing(self) -> str:
+        """给日志用：当前主模型 + 已耗尽的模型。"""
+        dead = [m for m, t in self._model_dead.items() if t > time.time()]
+        s = f"模型 {self.current_model()}"
+        if dead:
+            s += f"（已耗尽：{', '.join(sorted(dead))}）"
+        return s
+
+    def probe_route(self, log=None) -> str:
+        """开局探一次额度，把「当前实际能用哪个模型」提前定下来。
+
+        为什么要主动探：主模型的 429 只有在第一次请求后才知道，而日志里
+        先打印的会是主模型名字，跟实际跑起来用的不是一个 —— 主人看到
+        「模型 deepseek-v4.1-flash」再看到 1 句/秒，根本对不上。
+        探一次只花不到 1 秒（限流是立刻返回的，不会挂住）。
+        """
+        if not self.use_wb():
+            return self.current_model()
+        from . import wbdirect
+        # 换了账号之后，之前判死的模型可能又活了（配额是按账号×模型算的）。
+        # 所有候选都被标死时清一次标记重探，否则账号一换就白等一整天。
+        if len(self._model_candidates()) <= 1 and self._model_dead:
+            with self._lock_for_models():
+                self._model_dead.clear()
+            self._active_model = self.model
+        for model in self._model_candidates():
+            try:
+                wbdirect.chat(self._wb_account(), model,
+                              [{"role": "user", "content": "hi"}],
+                              max_tokens=1, temperature=0.0, timeout=20)
+                self._active_model = model
+                break
+            except Exception as e:
+                if _is_rate_limited(e):
+                    self.mark_model_dead(model, _reset_ts(e))
+                    continue
+                break        # 不是限流（网络抖动等），别乱标，直接用当前模型
+        if log:
+            log(f"额度探测：{self.describe_routing()}")
+        return self.current_model()
+
     def chat(self, system: str, user: str, temperature: Optional[float] = None) -> str:
         if self.use_wb():
             from . import wbdirect
-            acc = self._wb_account()
-            msgs = [{"role": "system", "content": system},
-                    {"role": "user", "content": user}]
-            try:
-                return wbdirect.chat(acc, self.model, msgs,
-                                     max_tokens=self.max_tokens,
-                                     temperature=self.temperature if temperature is None else temperature,
-                                     timeout=self.timeout)
-            except Exception as e:
-                # token 过期就地换一次再重试
-                if "401" in str(e) or "unauthorized" in str(e).lower():
-                    self._wb_acc = wbdirect.refresh(acc)
-                    return wbdirect.chat(self._wb_acc, self.model, msgs,
-                                         max_tokens=self.max_tokens,
-                                         temperature=self.temperature if temperature is None else temperature,
-                                         timeout=self.timeout)
-                raise
+            # 降级是逐模型尝试的：模型级配额耗尽不等于账号坏了，
+            # 所以先在同账号上换模型，全换完还不行才由上层换账号。
+            last_err: Exception | None = None
+            for model in self._model_candidates():
+                acc = self._wb_account()
+                msgs = [{"role": "system", "content": system},
+                        {"role": "user", "content": user}]
+                try:
+                    out = wbdirect.chat(acc, model, msgs,
+                                        max_tokens=self.max_tokens,
+                                        temperature=self.temperature if temperature is None else temperature,
+                                        timeout=self.timeout)
+                    if model != self._active_model:
+                        self._active_model = model
+                    return out
+                except Exception as e:
+                    # token 过期就地换一次再重试
+                    if "401" in str(e) or "unauthorized" in str(e).lower():
+                        self._wb_acc = wbdirect.refresh(acc)
+                        return wbdirect.chat(self._wb_acc, model, msgs,
+                                             max_tokens=self.max_tokens,
+                                             temperature=self.temperature if temperature is None else temperature,
+                                             timeout=self.timeout)
+                    last_err = e
+                    if _is_rate_limited(e):
+                        # 该模型配额耗尽：标掉它，继续试下一个模型。
+                        # 不在这里 sleep —— 还有别的模型能用就没必要等。
+                        until = _reset_ts(e)
+                        self.mark_model_dead(model, until)
+                        continue
+                    raise
+            raise last_err if last_err else RuntimeError("所有模型都不可用")
         body = json.dumps({
             "model": self.model,
             "messages": [
@@ -709,11 +838,13 @@ class Translator:
                     # 先换账号：配额是按账号算的，主账号撞限流时另几个往往还能用。
                     # 全部账号都限流了才退避等待。
                     if self._rotate_account():
-                        self.log("[限流] 换一个 WorkBuddy 账号继续")
+                        self.log("[限流] 换一个 WorkBuddy 账号继续"
+                                 f"（当前 {self.backend.describe_routing()}）")
                         continue
                     wait = self._rate_wait()
                     self.log(f"[限流] 所有账号都在限流，等待 {wait:.0f}s 后继续"
-                             f"（剩余 {len(remaining)} 句未翻）")
+                             f"（剩余 {len(remaining)} 句未翻；"
+                             f"{self.backend.describe_routing()}）")
                     time.sleep(wait)
                     continue
                 last_err = f"请求失败: {e}"
@@ -1105,6 +1236,7 @@ class Translator:
     def translate_items(self, items: list[dict], progress=None,
                         stop_flag=None) -> dict:
         """items 需要有 id/src/who/label 字段；返回统计"""
+        self.backend.probe_route(self.log)
         uniq_order: list[str] = []
         seen = set()
         for it in items:
@@ -1116,6 +1248,10 @@ class Translator:
         todo = [s for s in uniq_order if s not in self.cache]
         self.stats["cache_hit"] = len(uniq_order) - len(todo)
         self.log(f"唯一句子 {len(uniq_order)}，缓存命中 {self.stats['cache_hit']}，待翻 {len(todo)}")
+        # 开局就把路由写进日志：主模型额度用尽时这里是唯一能看出
+        # 「为什么速度和昨天不一样」的地方。
+        self.log(f"翻译路由：{self.backend.describe_routing()}，"
+                 f"并发 {self.concurrency}，每批 {self.batch_size} 句")
 
         # 为每个唯一句建索引：出现在哪几条、上下文是什么
         ctx_of: dict[str, dict] = {}
